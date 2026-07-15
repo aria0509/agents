@@ -70,6 +70,10 @@ web_modules/
 .env.*
 !.env.example
 
+# App Store Connect API private key (notarization) — NEVER commit
+*.p8
+*.p12
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
@@ -141,3 +145,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# spike outputs
+spikes/out/
+
+# electron-builder output
+release/

@@ -1,0 +1,102 @@
+{
+  "appName": "Agent S",
+  "common": {
+    "close": "關閉",
+    "cancel": "取消",
+    "create": "建立",
+    "save": "儲存",
+    "delete": "刪除",
+    "browse": "瀏覽",
+    "copy": "複製",
+    "copied": "已複製",
+    "open": "開啟",
+    "submit": "送出"
+  },
+  "sessions": {
+    "empty": "尚無 Session",
+    "emptyHint": "建立 Session 開始管理 Claude Code",
+    "new": "新增 Session"
+  },
+  "session": {
+    "cwd": "工作目錄",
+    "titleField": "標題",
+    "titlePlaceholder": "選填，顯示在卡片上",
+    "account": "帳號",
+    "accountAuto": "自動選擇（用量最低的可用帳號）",
+    "limitRule": "達上限規則",
+    "launchArgs": "啟動參數",
+    "launchArgsHint": "以空白分隔，例如 --model opus。改動下次啟動生效。",
+    "inputPlaceholder": "傳訊息給 Claude…",
+    "dropHint": "放開以加入檔案路徑",
+    "send": "送出",
+    "settings": "Session 設定",
+    "switchWhenIdle": "（僅在非執行中可切換）",
+    "popOut": "獨立視窗開啟",
+    "restart": "重新啟動",
+    "delete": "刪除 Session",
+    "exitedHint": "已結束——點擊恢復",
+    "poppedOutHint": "已在獨立視窗——點擊聚焦",
+    "state": {
+      "idle": "閒置",
+      "running": "執行中",
+      "needs-attention": "需要處理",
+      "done": "任務完成",
+      "rate-limited": "已達限額",
+      "exited": "已結束"
+    }
+  },
+  "limitRule": {
+    "auto-switch": "自動切換帳號",
+    "manual": "手動處理（通知並等待）",
+    "wait-and-continue": "等額度刷新後自動繼續"
+  },
+  "account": {
+    "title": "帳號管理",
+    "empty": "尚無帳號——掃描本機或新增",
+    "discover": "掃描本機既有帳號（~/.claude*）",
+    "name": "名稱",
+    "path": "配置路徑",
+    "note": "備註",
+    "notePlaceholder": "備註（選填）",
+    "add": "新增帳號",
+    "edit": "編輯",
+    "pathPlaceholder": "留空預設 ~/.claude-<名稱>",
+    "refresh": "重新檢查登入狀態與用量",
+    "login": "登入",
+    "loginStarting": "取得登入連結中…",
+    "loginUrlHint": "開啟或複製下方連結，在瀏覽器完成登入後，把取得的代碼貼回：",
+    "loginCode": "登入代碼",
+    "loginCodePlaceholder": "貼上代碼",
+    "loginFailed": "登入失敗，請確認代碼後重試",
+    "deleteInUse": "有 {{count}} 個 session 正在使用此帳號，請先刪除或切換它們的帳號",
+    "deleteConfirm": "確定要刪除帳號「{{name}}」嗎？",
+    "deleteConfirmDir": "會一併刪除設定目錄（登入與對話記錄都會消失），無法復原：",
+    "confirmDelete": "確認刪除",
+    "refreshedAt": "更新於",
+    "fiveHour": "5h",
+    "weekly": "週",
+    "remain": "剩",
+    "reset": "刷新",
+    "noEmail": "未登入",
+    "status": {
+      "logged_in": "已登入",
+      "logged_out": "未登入",
+      "expired": "已失效",
+      "unknown": "未知"
+    }
+  },
+  "usage": {
+    "current": "目前",
+    "weekly": "本週"
+  },
+  "settings": {
+    "title": "設定",
+    "language": "語言",
+    "theme": "主題",
+    "themeLight": "淺色",
+    "themeDark": "深色",
+    "themeSystem": "跟隨系統",
+    "cardSize": "櫥窗尺寸",
+    "preferences": "偏好設定"
+  }
+}

@@ -2,6 +2,9 @@
 
 本檔案為 Claude Code（claude.ai/code）在此倉庫中工作時提供指引。
 
+## 接手必讀
+動手前先讀 **`ARCHITECTURE.md`**：架構、關鍵機制與踩過的坑（node-pty ABI、殺進程 pattern、loginShellEnv 洩漏、TUI 文字偵測、dev/prod 資料目錄等）。專案概覽見 `README.md`。
+
 ## 溝通與語言
 - 與我**溝通一律使用繁體中文**。
 - 程式碼的**註解與編碼（命名、識別字）通常使用英文**；編輯既有檔案時配合周圍既有的語言。

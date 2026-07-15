@@ -1,0 +1,102 @@
+{
+  "appName": "Agent S",
+  "common": {
+    "close": "Close",
+    "cancel": "Cancel",
+    "create": "Create",
+    "save": "Save",
+    "delete": "Delete",
+    "browse": "Browse",
+    "copy": "Copy",
+    "copied": "Copied",
+    "open": "Open",
+    "submit": "Submit"
+  },
+  "sessions": {
+    "empty": "No sessions yet",
+    "emptyHint": "Create a session to start managing Claude Code",
+    "new": "New Session"
+  },
+  "session": {
+    "cwd": "Working directory",
+    "titleField": "Title",
+    "titlePlaceholder": "Optional, shown on the card",
+    "account": "Account",
+    "accountAuto": "Auto-pick (lowest-usage available account)",
+    "limitRule": "On limit reached",
+    "launchArgs": "Launch args",
+    "launchArgsHint": "Space-separated, e.g. --model opus. Applies on next start.",
+    "inputPlaceholder": "Message Claude…",
+    "dropHint": "Drop to add file path",
+    "send": "Send",
+    "settings": "Session settings",
+    "switchWhenIdle": "(only while not running)",
+    "popOut": "Open in separate window",
+    "restart": "Restart",
+    "delete": "Delete session",
+    "exitedHint": "Exited — click to resume",
+    "poppedOutHint": "Open in its own window — click to focus",
+    "state": {
+      "idle": "Idle",
+      "running": "Running",
+      "needs-attention": "Needs attention",
+      "done": "Done",
+      "rate-limited": "Rate limited",
+      "exited": "Exited"
+    }
+  },
+  "limitRule": {
+    "auto-switch": "Auto-switch account",
+    "manual": "Notify and wait",
+    "wait-and-continue": "Wait for reset, then continue"
+  },
+  "account": {
+    "title": "Accounts",
+    "empty": "No accounts — scan this machine or add one",
+    "discover": "Scan existing accounts (~/.claude*)",
+    "name": "Name",
+    "path": "Config path",
+    "note": "Note",
+    "notePlaceholder": "Note (optional)",
+    "add": "Add account",
+    "edit": "Edit",
+    "pathPlaceholder": "blank → ~/.claude-<name>",
+    "refresh": "Re-check login status and usage",
+    "login": "Log in",
+    "loginStarting": "Getting sign-in link…",
+    "loginUrlHint": "Open or copy the link below to sign in, then paste the code back:",
+    "loginCode": "Sign-in code",
+    "loginCodePlaceholder": "Paste code",
+    "loginFailed": "Login failed — check the code and try again",
+    "deleteInUse": "{{count}} session(s) use this account — remove or reassign them first",
+    "deleteConfirm": "Delete account \"{{name}}\"?",
+    "deleteConfirmDir": "This also deletes its config directory (login + transcripts) — cannot be undone:",
+    "confirmDelete": "Confirm delete",
+    "refreshedAt": "updated",
+    "fiveHour": "5h",
+    "weekly": "Weekly",
+    "remain": "left",
+    "reset": "reset",
+    "noEmail": "not logged in",
+    "status": {
+      "logged_in": "Logged in",
+      "logged_out": "Logged out",
+      "expired": "Expired",
+      "unknown": "Unknown"
+    }
+  },
+  "usage": {
+    "current": "Current",
+    "weekly": "Weekly"
+  },
+  "settings": {
+    "title": "Settings",
+    "language": "Language",
+    "theme": "Theme",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "themeSystem": "System",
+    "cardSize": "Card size",
+    "preferences": "Preferences"
+  }
+}

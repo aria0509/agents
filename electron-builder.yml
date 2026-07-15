@@ -1,0 +1,51 @@
+appId: com.agents.claudecode
+productName: Agent S
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - assets/icon.png
+  - package.json
+  - '!**/{.eslintrc,.prettierrc,tsconfig*.json,*.md}'
+# node-pty ships a native .node addon that cannot live inside the asar archive
+asarUnpack:
+  - node_modules/node-pty/**
+mac:
+  icon: assets/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  # Pin to the Developer ID Application cert (substring match). Explicit so it
+  # never silently falls back to the "Apple Development" cert, which can't be
+  # notarized. Create the cert first (see PACKAGING.md).
+  identity: Developer ID Application
+  # Hardened runtime + entitlements are required for notarization.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarize via notarytool (electron-builder 26 wants a boolean here). Creds +
+  # team come from .env: API key (team derived from the key), or Apple ID +
+  # APPLE_TEAM_ID. Team must match the Developer ID cert (R9J9KG7R9J).
+  notarize: true
+# DMG opens to the classic "drag app → Applications" layout
+dmg:
+  title: ${productName}
+  contents:
+    - x: 140
+      y: 200
+      type: file
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
+# we rebuild node-pty ourselves with @electron/rebuild; don't let builder redo it
+npmRebuild: false
