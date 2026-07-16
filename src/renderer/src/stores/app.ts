@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { TFunction } from 'i18next'
 import type { Account } from '@shared/types'
 import type { AppState, SessionView } from '@shared/ipc'
 
@@ -46,6 +47,13 @@ window.api.onStateChanged((s) => useApp.setState(s))
 
 export const accountName = (accounts: Account[], dir: string): string =>
   accounts.find((a) => a.configDir === dir)?.name ?? dir
+
+/** One-line account label for the session-account dropdowns: name, plus its login
+ *  status when not logged in, or its current (5-hour) usage when it is. */
+export const accountOptionLabel = (a: Account, t: TFunction): string => {
+  if (a.loginStatus !== 'logged_in') return `${a.name} · ${t(`account.status.${a.loginStatus}`)}`
+  return a.usage.fiveHour != null ? `${a.name} · ${t('usage.current')} ${Math.round(a.usage.fiveHour)}%` : a.name
+}
 
 export const sortedSessions = (sessions: SessionView[]): SessionView[] =>
   [...sessions].sort((a, b) => a.order - b.order)

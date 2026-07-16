@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, PanelRightOpen, Settings2 } from 'lucide-react'
+import { GripVertical, PanelRightOpen, Power, Settings2 } from 'lucide-react'
 import type { SessionView } from '@shared/ipc'
 import type { SessionState } from '@shared/types'
 import { Button } from '@/components/ui/button'
@@ -125,6 +125,18 @@ export function SessionCard({ session }: { session: SessionView }) {
             >
               <Settings2 className="size-3.5" />
             </Button>
+            {/* stop a running session → it becomes an "exited, click to resume" card */}
+            {session.alive && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-muted-foreground hover:text-destructive"
+                aria-label={t('session.stop')}
+                onClick={() => void window.api.stopSession(session.id)}
+              >
+                <Power className="size-3.5" />
+              </Button>
+            )}
           </div>
         </div>
 

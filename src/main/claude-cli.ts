@@ -95,6 +95,11 @@ export async function authStatus(configDir: string, retry = 1): Promise<AuthStat
   }
 }
 
+/** Log an account out (`claude auth logout`) for a given config dir. */
+export async function claudeLogout(configDir: string): Promise<void> {
+  await execFileP(await claudePath(), ['auth', 'logout'], { env: await envFor(configDir), timeout: 30_000 })
+}
+
 /**
  * Settings file injected via `--settings`: forwards hooks + statusline to our
  * local hook server. NEVER write into <configDir>/settings.json — profiles may
@@ -162,11 +167,16 @@ export function detectRateLimit(text: string): boolean {
 }
 
 /**
- * The trust prompt claude shows the first time it opens an untrusted folder
- * ("Security guide" / "Yes, I trust this folder", Enter pre-confirms).
+ * The trust prompt claude shows the first time an account opens an untrusted
+ * folder — e.g. "Quick safety check: Is this a project you created or one you
+ * trust?" (older builds: "Security guide" / "trust this folder"). Enter accepts
+ * the pre-selected "yes". Kept broad so a wording change is a one-line fix — this
+ * MUST stay current or account-switch resume hangs on the new account's prompt.
  */
 export function isTrustPrompt(text: string): boolean {
-  return /trust\s*this\s*folder|Security\s*guide/i.test(stripAnsi(text))
+  return /trust\s*this\s*folder|Security\s*guide|safety\s*check|created\s*or\s*one\s*you\s*trust|Do\s*you\s*trust/i.test(
+    stripAnsi(text)
+  )
 }
 
 /** `claude --resume <id>` failed because the transcript is gone/incompatible. */

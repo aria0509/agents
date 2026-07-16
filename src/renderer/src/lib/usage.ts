@@ -4,6 +4,17 @@ export const hasUsage = (u: AccountUsage): boolean => u.fiveHour != null || u.we
 
 const pct = (v: number | null): string => (v == null ? '–' : `${Math.round(v)}%`)
 
+/** localized "n minutes/hours/days ago" for a past epoch (ms). Smallest unit is a
+ *  minute (callers show "just now" for < 1 min). Null if unknown. */
+export function timeAgo(ts: number | null, locale: string): string | null {
+  if (!ts) return null
+  const s = Math.round((ts - Date.now()) / 1000) // negative = in the past
+  const a = Math.abs(s)
+  const [v, unit]: [number, Intl.RelativeTimeFormatUnit] =
+    a < 3600 ? [s / 60, 'minute'] : a < 86400 ? [s / 3600, 'hour'] : [s / 86400, 'day']
+  return new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(Math.min(-1, Math.round(v)), unit)
+}
+
 /** human "time until" a reset epoch, or null if unknown/past */
 export function resetIn(resetsAt: number | null): string | null {
   if (!resetsAt) return null

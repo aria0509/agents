@@ -5,7 +5,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path'
 import type { Account, AccountUsage } from '../shared/types'
 import type { NewAccountInput } from '../shared/ipc'
 import type { AppStore } from './store'
-import { authStatus, claudePath, envFor, extractLoginUrl, fetchUsage } from './claude-cli'
+import { authStatus, claudeLogout, claudePath, envFor, extractLoginUrl, fetchUsage } from './claude-cli'
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -215,45 +215,74 @@ export class AccountManager {
   async startLogin(configDir: string): Promise<string> {
     this.cancelLogin(configDir)
     const env = await envFor(configDir)
+    const bin = await claudePath()
+    // Re-cancel right before spawning: React StrictMode (dev) runs the dialog effect
+    // twice, so two startLogin calls race. Doing the kill + spawn + set with no await
+    // in between guarantees exactly one live login pty — otherwise the URL shown and
+    // the pty that receives the pasted code have DIFFERENT OAuth states → "invalid code".
+    this.cancelLogin(configDir)
     env['PATH'] = `${this.noBrowserPath()}:${env['PATH'] ?? ''}`
-    const proc = pty.spawn(await claudePath(), ['auth', 'login'], {
-      name: 'xterm-256color',
-      cols: 100,
-      rows: 30,
-      cwd: homedir(),
-      env
-    })
+    const proc = pty.spawn(bin, ['auth', 'login'], { name: 'xterm-256color', cols: 100, rows: 30, cwd: homedir(), env })
     this.logins.set(configDir, proc)
     let buf = ''
+    let settled = false
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
         this.cancelLogin(configDir)
         reject(new Error('login URL not found'))
       }, 20_000)
       proc.onData((d) => {
         buf += d
         const url = extractLoginUrl(buf)
-        if (url) {
+        if (url && !settled) {
+          settled = true
           clearTimeout(timer)
           resolve(url)
         }
       })
       proc.onExit(() => {
         clearTimeout(timer)
-        reject(new Error('login process exited'))
+        if (this.logins.get(configDir) === proc) this.logins.delete(configDir) // don't clobber a newer login
+        // login finished (pasted code, or a browser callback) or was aborted —
+        // re-check auth so a success reaches the UI, which auto-closes on logged_in
+        if (settled) void this.refreshAuth(configDir)
+        else {
+          settled = true
+          reject(new Error('login process exited before URL'))
+        }
       })
     })
   }
 
-  /** Write the pasted code, wait for login to finish, return whether it worked. */
+  /** Write the pasted code (if the login is still waiting), then verify via auth. */
   async submitLoginCode(configDir: string, code: string): Promise<boolean> {
     const proc = this.logins.get(configDir)
-    if (!proc) throw new Error('no login in progress')
-    proc.write(code.trim() + '\r')
-    await Promise.race([new Promise<void>((r) => proc.onExit(() => r())), sleep(25_000)])
+    if (proc) {
+      // send the (long) code, then Enter after a beat so the whole line is buffered
+      // before submit — an immediate CR can cut a long paste short → "invalid code"
+      proc.write(code.trim())
+      await sleep(80)
+      proc.write('\r')
+      await Promise.race([new Promise<void>((r) => proc.onExit(() => r())), sleep(25_000)])
+    }
+    // the pty may already be gone (it timed out, or a browser callback finished the
+    // login) — don't error; just confirm the outcome via auth status
     this.cancelLogin(configDir)
     await this.refreshAuth(configDir)
     return this.get(configDir)?.loginStatus === 'logged_in'
+  }
+
+  /** Log the account out, then refresh its status. */
+  async logout(configDir: string): Promise<void> {
+    this.cancelLogin(configDir)
+    try {
+      await claudeLogout(configDir)
+    } catch {
+      /* best-effort — refreshAuth reflects the real state */
+    }
+    await this.refreshAuth(configDir)
   }
 
   /** Abort an in-progress login (dialog closed / account removed). */

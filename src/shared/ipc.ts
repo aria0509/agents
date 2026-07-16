@@ -76,11 +76,15 @@ export interface IpcApi {
   submitLoginCode(configDir: string, code: string): Promise<boolean>
   /** abort an in-progress login (dialog closed) */
   cancelLogin(configDir: string): Promise<void>
+  /** log an account out */
+  logout(configDir: string): Promise<void>
   removeAccount(configDir: string): Promise<void>
 
   // sessions
   createSession(input: NewSessionInput): Promise<string>
   restartSession(id: string): Promise<void>
+  /** stop a running session without removing it (becomes an exited, resumable card) */
+  stopSession(id: string): Promise<void>
   removeSession(id: string): Promise<void>
   /** move the session to another account (only when idle): move transcript + resume */
   switchAccount(id: string, targetAccountDir: string): Promise<void>
@@ -125,9 +129,11 @@ export const INVOKE_CHANNELS = [
   'startLogin',
   'submitLoginCode',
   'cancelLogin',
+  'logout',
   'removeAccount',
   'createSession',
   'restartSession',
+  'stopSession',
   'removeSession',
   'switchAccount',
   'updateSessionConfig',

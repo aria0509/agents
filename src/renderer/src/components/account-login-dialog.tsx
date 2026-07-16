@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useApp } from '@/stores/app'
 
 /**
  * OAuth login for one account. Starts `claude auth login` (which also opens the
@@ -19,6 +20,9 @@ export function AccountLoginDialog({ account, onClose }: { account: Account; onC
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // the account flips to logged_in once login completes (pasted code, or a browser
+  // callback) — auto-close the dialog when it does
+  const loggedIn = useApp((s) => s.accounts.find((a) => a.configDir === account.configDir)?.loginStatus === 'logged_in')
 
   useEffect(() => {
     let alive = true
@@ -31,6 +35,10 @@ export function AccountLoginDialog({ account, onClose }: { account: Account; onC
       void window.api.cancelLogin(account.configDir)
     }
   }, [account.configDir])
+
+  useEffect(() => {
+    if (loggedIn) onClose()
+  }, [loggedIn, onClose])
 
   const submit = async (): Promise<void> => {
     if (!code.trim()) return

@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useApp } from '@/stores/app'
-import { hasUsage, usageLines } from '@/lib/usage'
+import { hasUsage, timeAgo, usageLines } from '@/lib/usage'
 import { AccountEditDialog } from '@/components/account-edit-dialog'
 import { AccountLoginDialog } from '@/components/account-login-dialog'
 
@@ -19,13 +19,19 @@ const STATUS_VARIANT: Record<LoginStatus, 'default' | 'secondary' | 'destructive
 }
 
 function AccountRow({ account, onEdit, onLogin }: { account: Account; onEdit: () => void; onLogin: () => void }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [busy, setBusy] = useState(false)
   const u = account.usage
   const lines = hasUsage(u)
     ? usageLines(u, { current: t('usage.current'), weekly: t('usage.weekly'), reset: t('account.reset') })
     : null
   const loggedIn = account.loginStatus === 'logged_in'
+  const checkedText =
+    account.authCheckedAt == null
+      ? null
+      : Date.now() - account.authCheckedAt < 60_000
+        ? t('account.justNow')
+        : timeAgo(account.authCheckedAt, i18n.language)
 
   return (
     <div className="flex items-start gap-3 rounded-md border p-3">
@@ -36,13 +42,20 @@ function AccountRow({ account, onEdit, onLogin }: { account: Account; onEdit: ()
           {account.subscriptionType && <Badge variant="outline">{account.subscriptionType}</Badge>}
           {account.note && <span className="text-muted-foreground truncate text-xs">— {account.note}</span>}
         </div>
-        <div className="text-muted-foreground truncate text-xs">{account.email ?? t('account.noEmail')}</div>
-        <div className="text-muted-foreground truncate text-xs">{account.configDir}</div>
+        <div className="text-muted-foreground truncate text-xs">
+          {account.configDir}
+          {account.email ? ` · ${account.email}` : ''}
+        </div>
         {lines && (
           <div className="text-muted-foreground text-xs leading-relaxed">
             {lines.map((line) => (
               <div key={line}>{line}</div>
             ))}
+          </div>
+        )}
+        {checkedText && (
+          <div className="text-muted-foreground/70 text-xs">
+            {t('account.refreshedAt')} {checkedText}
           </div>
         )}
       </div>

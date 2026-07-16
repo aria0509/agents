@@ -75,16 +75,15 @@ export class SessionManager extends EventEmitter {
    * that never exchanged a message never persisted one, so a `--resume` would
    * just fail; clearing it makes the click start fresh directly.
    */
-  restoreAsExited(): void {
-    this.store.set(
-      'sessions',
-      this.list().map((s) => ({
-        ...s,
-        poppedOut: false,
-        state: 'exited' as const,
-        ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
-      }))
-    )
+  restoreAsExited(): number {
+    const sessions = this.list().map((s) => ({
+      ...s,
+      poppedOut: false,
+      state: 'exited' as const,
+      ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
+    }))
+    this.store.set('sessions', sessions)
+    return sessions.length
   }
 
   get(id: string): Session | undefined {
@@ -131,6 +130,21 @@ export class SessionManager extends EventEmitter {
     if (session.claudeSessionId) this.resuming.add(id) // watch for a failed resume
     await this.spawn(session, { resume: true })
     this.update(id, { state: 'idle' })
+  }
+
+  /**
+   * Stop a running session without removing it — kill claude so the card becomes
+   * "exited — click to resume", keeping its record + transcript for later resume.
+   */
+  stop(id: string): void {
+    this.clearResetTimer(id)
+    this.pendingContinue.delete(id)
+    this.ptys.kill(id) // exit handler (id not in `resuming`) marks it exited
+  }
+
+  /** Resume every restored (exited) session — the startup "restore last time?" action. */
+  async restoreAll(): Promise<void> {
+    await Promise.all(this.list().map((s) => this.restart(s.id))) // restart no-ops on the already-alive
   }
 
   /**
@@ -190,13 +204,27 @@ export class SessionManager extends EventEmitter {
     if (session.state === 'running') throw new Error('cannot switch account while running')
 
     await this.ptys.killAndWait(id)
-    let transcriptPath = session.transcriptPath
-    if (transcriptPath) {
-      transcriptPath = moveTranscript(transcriptPath, session.accountDir, targetDir)
-    }
-    this.update(id, { accountDir: targetDir, transcriptPath, state: 'idle' })
+    // the target account hasn't trusted this folder yet — reset so its own
+    // "trust this folder" prompt gets auto-confirmed (trusted is per-session and
+    // would otherwise still be set from the previous account). tail too, so stale
+    // output doesn't confuse prompt detection.
+    this.trusted.delete(id)
+    this.tail.delete(id)
+    // Only resume if there's actually a transcript to resume. A session whose
+    // transcript is gone (never messaged, or already cleaned up) must start FRESH
+    // under the new account — otherwise `claude --resume` dies with "No
+    // conversation found" and the card is stuck.
+    const canResume = !!session.claudeSessionId && !!session.transcriptPath && existsSync(session.transcriptPath)
+    const transcriptPath = canResume ? moveTranscript(session.transcriptPath!, session.accountDir, targetDir) : null
+    this.update(id, {
+      accountDir: targetDir,
+      transcriptPath,
+      claudeSessionId: canResume ? session.claudeSessionId : null,
+      state: 'idle'
+    })
     if (opts.continueAfter) this.pendingContinue.add(id)
-    await this.spawn({ ...session, accountDir: targetDir, transcriptPath }, { resume: true })
+    if (canResume) this.resuming.add(id) // fall back to fresh if the resume still fails
+    await this.spawn(this.get(id)!, { resume: canResume })
   }
 
   write(id: string, data: string): void {

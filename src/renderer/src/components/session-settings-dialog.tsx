@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { LaunchArgsInput } from '@/components/launch-args-input'
-import { useApp } from '@/stores/app'
+import { useApp, accountOptionLabel } from '@/stores/app'
 
 const LIMIT_RULES: LimitRule[] = ['auto-switch', 'manual', 'wait-and-continue']
 
@@ -69,8 +69,7 @@ export function SessionSettingsDialog({ sessionId, onClose }: { sessionId: strin
               <SelectContent>
                 {accounts.map((a) => (
                   <SelectItem key={a.configDir} value={a.configDir}>
-                    {a.name}
-                    {a.usage.fiveHour != null ? ` · 5h ${Math.round(a.usage.fiveHour)}%` : ''}
+                    {accountOptionLabel(a, t)}
                   </SelectItem>
                 ))}
               </SelectContent>

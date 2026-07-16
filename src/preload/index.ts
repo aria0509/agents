@@ -42,6 +42,25 @@ const routeFiles = (target: EventTarget | null, files: FileList | undefined): bo
   emitPaths(target, paths)
   return true
 }
+// files dragged/copied from apps that expose them only as text/uri-list (VS Code,
+// browsers, some editors) rather than real File objects → their on-disk paths.
+// Finder supplies real Files (routeFiles handles those); this is the fallback.
+const routeUriList = (target: EventTarget | null, data: DataTransfer | null): boolean => {
+  const paths = (data?.getData('text/uri-list') || '')
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith('file://')) // skip comments (#) and non-file schemes
+    .map((l) => {
+      try {
+        return decodeURIComponent(new URL(l).pathname)
+      } catch {
+        return ''
+      }
+    })
+    .filter(Boolean)
+  if (paths.length === 0) return false
+  emitPaths(target, paths)
+  return true
+}
 // an in-memory pasted image (screenshot) → save the bytes to a temp file, insert its path
 const routeImage = (target: EventTarget | null, data: DataTransfer | null): boolean => {
   const item = [...(data?.items ?? [])].find((i) => i.kind === 'file' && i.type.startsWith('image/'))
@@ -58,14 +77,20 @@ const routeImage = (target: EventTarget | null, data: DataTransfer | null): bool
 // preventDefault on dragover stops the window from navigating to the dropped file.
 window.addEventListener('dragover', (e) => e.preventDefault(), true)
 window.addEventListener('drop', (e) => {
-  if ((e.dataTransfer?.files.length ?? 0) === 0) return // let normal text drops through
-  e.preventDefault()
-  e.stopPropagation()
-  routeFiles(e.target, e.dataTransfer?.files)
+  // real Files (Finder) → uri-list paths (VS Code); a plain-text drop matches
+  // neither and falls through unchanged
+  if (routeFiles(e.target, e.dataTransfer?.files) || routeUriList(e.target, e.dataTransfer)) {
+    e.preventDefault()
+    e.stopPropagation()
+  }
 }, true)
 window.addEventListener('paste', (e) => {
-  // file path first (Finder copy), else a pasted image; plain text falls through
-  if (routeFiles(e.target, e.clipboardData?.files) || routeImage(e.target, e.clipboardData)) {
+  // file path (Finder copy) → pasted image → uri-list (VS Code); plain text falls through
+  if (
+    routeFiles(e.target, e.clipboardData?.files) ||
+    routeImage(e.target, e.clipboardData) ||
+    routeUriList(e.target, e.clipboardData)
+  ) {
     e.preventDefault()
     e.stopPropagation()
   }
@@ -84,10 +109,12 @@ const api: IpcApi = {
   startLogin: (dir) => invoke('startLogin', dir),
   submitLoginCode: (dir, code) => invoke('submitLoginCode', dir, code),
   cancelLogin: (dir) => invoke('cancelLogin', dir),
+  logout: (dir) => invoke('logout', dir),
   removeAccount: (dir) => invoke('removeAccount', dir),
 
   createSession: (input) => invoke('createSession', input),
   restartSession: (id) => invoke('restartSession', id),
+  stopSession: (id) => invoke('stopSession', id),
   removeSession: (id) => invoke('removeSession', id),
   switchAccount: (id, dir) => invoke('switchAccount', id, dir),
   updateSessionConfig: (id, patch) => invoke('updateSessionConfig', id, patch),

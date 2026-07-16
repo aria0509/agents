@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Trash2 } from 'lucide-react'
+import { Loader2, LogOut, Trash2 } from 'lucide-react'
 import type { Account } from '@shared/types'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -14,6 +14,7 @@ export function AccountEditDialog({ account, onClose }: { account: Account; onCl
   const inUse = useApp((s) => s.sessions.filter((x) => x.accountDir === account.configDir).length)
   const [note, setNote] = useState(account.note)
   const [confirming, setConfirming] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
   const [error, setError] = useState('')
 
   const del = async (): Promise<void> => {
@@ -24,6 +25,13 @@ export function AccountEditDialog({ account, onClose }: { account: Account; onCl
     } catch (e) {
       setError(String(e))
     }
+  }
+
+  const logout = async (): Promise<void> => {
+    setLoggingOut(true)
+    await window.api.logout(account.configDir)
+    setLoggingOut(false)
+    onClose()
   }
 
   return (
@@ -54,9 +62,16 @@ export function AccountEditDialog({ account, onClose }: { account: Account; onCl
               <Trash2 /> {t('account.confirmDelete')}
             </Button>
           ) : (
-            <Button variant="ghost" className="text-destructive" disabled={inUse > 0} onClick={() => setConfirming(true)}>
-              <Trash2 /> {t('common.delete')}
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="ghost" className="text-destructive" disabled={inUse > 0} onClick={() => setConfirming(true)}>
+                <Trash2 /> {t('common.delete')}
+              </Button>
+              {account.loginStatus === 'logged_in' && (
+                <Button variant="ghost" disabled={loggingOut} onClick={() => void logout()}>
+                  {loggingOut ? <Loader2 className="size-4 animate-spin" /> : <LogOut />} {t('account.logout')}
+                </Button>
+              )}
+            </div>
           )}
           <div className="flex gap-2">
             <Button variant="outline" onClick={confirming ? () => setConfirming(false) : onClose}>

@@ -9,7 +9,9 @@ const findSessionId = (target: EventTarget | null): string | null => {
   while (el && el.dataset?.sessionId === undefined) el = el.parentElement
   return el?.dataset.sessionId ?? null
 }
-const isFileDrag = (e: DragEvent): boolean => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files')
+// real files (Finder) expose 'Files'; VS Code / browsers expose 'text/uri-list'
+const isFileDrag = (e: DragEvent): boolean =>
+  !!e.dataTransfer && e.dataTransfer.types.some((t) => t === 'Files' || t === 'text/uri-list')
 
 // Drag-zone feedback. Capture phase + `dropEffect='copy'` so the whole card —
 // including the xterm terminal — shows a copy cursor and accepts the drop
