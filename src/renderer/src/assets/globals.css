@@ -79,3 +79,13 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Claude's TUI turns on mouse reporting mid-conversation, which makes xterm flip
+   the pointer to `default` (.xterm.enable-mouse-events). The terminal should
+   always read as selectable text — the extra .cursor-text ancestor outranks
+   xterm.css regardless of stylesheet order. */
+.cursor-text .xterm,
+.cursor-text .xterm.enable-mouse-events,
+.cursor-text .xterm .xterm-viewport {
+  cursor: text;
+}

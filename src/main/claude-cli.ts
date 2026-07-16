@@ -5,10 +5,10 @@
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { writeFileSync, mkdirSync, copyFileSync, existsSync, renameSync, rmSync, readFileSync } from 'node:fs'
+import { writeFileSync, mkdirSync, copyFileSync, existsSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
+import pty from 'node-pty'
 import type { AccountUsage } from '../shared/types'
 
 const execFileP = promisify(execFile)
@@ -153,7 +153,10 @@ export function moveTranscript(transcriptPath: string, fromDir: string, toDir: s
  * `\s*` (zero-or-more) between words to tolerate the collapsed result.
  */
 function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b[()][AB0]/g, '')
+  return text
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '') // OSC (titles, hyperlinks)
+    .replace(/\x1b[()][AB0]/g, '')
 }
 
 /**
@@ -196,75 +199,148 @@ export function extractLoginUrl(text: string): string | null {
   return plain ? plain[0] : null
 }
 
-/**
- * Read an account's OAuth access token. Claude stores it either in
- * `<configDir>/.credentials.json` (file) or, on macOS, the Keychain under
- * `Claude Code-credentials[-<sha256(configDir)[:8]>]` (the default profile has
- * no suffix). The Keychain read triggers a one-time macOS permission prompt.
- */
-async function readToken(configDir: string): Promise<string | null> {
-  try {
-    const creds = JSON.parse(readFileSync(join(configDir, '.credentials.json'), 'utf8'))
-    if (creds?.claudeAiOauth?.accessToken) return creds.claudeAiOauth.accessToken
-  } catch {
-    /* fall through to keychain */
+// ── usage probe (claude's own /usage panel) ─────────────────────────────────
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** Panel reset note → epoch ms. Formats: "6:10pm" (today/tomorrow) or
+ *  "Jul 16 at 9pm"; spaces may be collapsed by cursor-positioning codes. */
+function parseResetTime(s: string): number | null {
+  const m = /(?:([A-Za-z]{3})\s*(\d{1,2})\s*at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i.exec(s)
+  if (!m) return null
+  const [, mon, day, h12, min, ampm] = m
+  const d = new Date()
+  d.setSeconds(0, 0)
+  d.setHours((parseInt(h12, 10) % 12) + (ampm.toLowerCase() === 'pm' ? 12 : 0), min ? parseInt(min, 10) : 0)
+  const monthIdx = mon ? MONTHS.indexOf(mon.toLowerCase()) : -1
+  if (monthIdx >= 0) {
+    d.setMonth(monthIdx, parseInt(day, 10))
+    if (d.getTime() < Date.now() - 86_400_000) d.setFullYear(d.getFullYear() + 1)
+  } else if (d.getTime() <= Date.now()) {
+    d.setDate(d.getDate() + 1)
   }
-  if (process.platform !== 'darwin') return null
-  const isDefault = resolve(configDir) === join(homedir(), '.claude')
-  const hash = createHash('sha256').update(resolve(configDir)).digest('hex').slice(0, 8)
-  const service = isDefault ? 'Claude Code-credentials' : `Claude Code-credentials-${hash}`
-  try {
-    const { stdout } = await execFileP('security', ['find-generic-password', '-s', service, '-w'], { timeout: 20_000 })
-    return JSON.parse(stdout.trim())?.claudeAiOauth?.accessToken ?? null
-  } catch {
-    return null
+  return d.getTime()
+}
+
+/** "<header> … N% used … Resets <when>", scoped to before the next section
+ *  header so a section missing its own "Resets" line (0% windows have none)
+ *  doesn't pick up the neighbour's. */
+function usageSection(text: string, header: RegExp): { percent: number | null; resetsAt: number | null } {
+  const m = header.exec(text)
+  if (!m) return { percent: null, resetsAt: null }
+  let tail = text.slice(m.index + m[0].length, m.index + m[0].length + 500)
+  const next = /Current\s*(session|week)/i.exec(tail)
+  if (next) tail = tail.slice(0, next.index)
+  const used = /(\d{1,3})\s*%\s*used/i.exec(tail)
+  const resets = /Resets\s*([^()\n]{1,40})/i.exec(tail)
+  return {
+    percent: used ? parseInt(used[1], 10) : null,
+    resetsAt: resets ? parseResetTime(resets[1]) : null
   }
 }
 
-interface UsageLimit {
-  kind?: string
-  percent?: number
-  resets_at?: string
-  scope?: { model?: { display_name?: string } }
+/**
+ * Parse the /usage panel out of accumulated TUI output. The TUI redraws, so the
+ * buffer holds several renders — parse only the last one. Returns null until
+ * both the session and weekly sections have rendered their percentages.
+ */
+export function parseUsagePanel(raw: string): AccountUsage | null {
+  const clean = stripAnsi(raw)
+  let last = -1
+  for (let m, re = /Current\s*session/gi; (m = re.exec(clean)); ) last = m.index
+  if (last < 0) return null
+  const text = clean.slice(last)
+
+  const session = usageSection(text, /Current\s*session/i)
+  const weekly = usageSection(text, /Current\s*week\s*\(\s*all\s*models\s*\)/i)
+  if (session.percent === null || weekly.percent === null) return null
+
+  // partial TUI redraws can repeat a section — the Map keeps the last (newest)
+  const models = new Map<string, number>()
+  for (let m, re = /Current\s*week\s*\(\s*([^)]+?)\s*\)/gi; (m = re.exec(text)); ) {
+    if (/all\s*models/i.test(m[1])) continue
+    const used = /(\d{1,3})\s*%\s*used/i.exec(text.slice(m.index + m[0].length, m.index + m[0].length + 500))
+    if (used) models.set(m[1].replace(/\s+/g, ' '), parseInt(used[1], 10))
+  }
+  const weeklyModels = [...models].map(([name, percent]) => ({ name, percent }))
+  return {
+    fiveHour: session.percent,
+    weekly: weekly.percent,
+    resetsAt: session.resetsAt,
+    weeklyResetsAt: weekly.resetsAt,
+    weeklyModels,
+    updatedAt: Date.now()
+  }
 }
 
 /**
- * Usage via the (undocumented) oauth usage endpoint, in the same shape claude's
- * own /usage panel shows: current % + reset, weekly all-models % + reset, and
- * per-model weekly (e.g. Fable). Returns null on any failure; live usage still
- * flows from the statusline while a session is active.
+ * Usage by asking claude itself: spawn the TUI, open /usage, scrape the panel,
+ * kill. Slower than an HTTP call (a few seconds) but by definition shows
+ * exactly what claude shows, and needs no token juggling — the undocumented
+ * oauth usage endpoint silently drifted (returned zeros) and is not to be
+ * trusted. Returns null on any failure; live usage still flows from the
+ * statusline while a session is active. Retries once — like `authStatus`,
+ * concurrently-started CLIs occasionally exit right away.
  */
-export async function fetchUsage(configDir: string): Promise<AccountUsage | null> {
-  const token = await readToken(configDir)
-  if (!token) return null
-  try {
-    const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
-      headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }
+export async function fetchUsage(configDir: string, retry = 1): Promise<AccountUsage | null> {
+  const usage = await probeUsage(configDir)
+  if (usage || retry <= 0) return usage
+  return fetchUsage(configDir, retry - 1)
+}
+
+async function probeUsage(configDir: string): Promise<AccountUsage | null> {
+  const [bin, env] = await Promise.all([claudePath(), envFor(configDir)])
+  const proc = pty.spawn(bin, [], { name: 'xterm-256color', cols: 120, rows: 40, cwd: homedir(), env })
+  let buf = ''
+  let trusted = false
+  let sent = false
+  let settling = false
+  return new Promise((resolve) => {
+    const finish = (usage: AccountUsage | null): void => {
+      clearInterval(poll)
+      clearTimeout(deadline)
+      try {
+        proc.kill()
+      } catch {
+        /* already gone */
+      }
+      resolve(usage)
+    }
+    const deadline = setTimeout(() => finish(parseUsagePanel(buf)), 45_000)
+    proc.onData((d) => {
+      buf += d
+      if (buf.length > 400_000) buf = buf.slice(-200_000)
     })
-    if (!res.ok) return null
-    const j = (await res.json()) as {
-      five_hour?: { utilization?: number; resets_at?: string }
-      seven_day?: { utilization?: number; resets_at?: string }
-      limits?: UsageLimit[]
-    }
-    const iso = (s?: string): number | null => (s ? new Date(s).getTime() : null)
-    const limits = j.limits ?? []
-    const session = limits.find((l) => l.kind === 'session')
-    const weeklyAll = limits.find((l) => l.kind === 'weekly_all')
-    const weeklyModels = limits
-      .filter((l) => l.kind === 'weekly_scoped' && l.scope?.model?.display_name)
-      .map((l) => ({ name: l.scope!.model!.display_name!, percent: Math.round(l.percent ?? 0) }))
-    return {
-      fiveHour: session?.percent ?? j.five_hour?.utilization ?? null,
-      weekly: weeklyAll?.percent ?? j.seven_day?.utilization ?? null,
-      resetsAt: iso(session?.resets_at ?? j.five_hour?.resets_at),
-      weeklyResetsAt: iso(weeklyAll?.resets_at ?? j.seven_day?.resets_at),
-      weeklyModels,
-      updatedAt: Date.now()
-    }
-  } catch {
-    return null
-  }
+    proc.onExit(() => finish(null))
+    const poll = setInterval(() => {
+      const text = stripAnsi(buf)
+      if (!trusted && isTrustPrompt(text)) {
+        trusted = true
+        buf = ''
+        proc.write('\r')
+        return
+      }
+      if (!sent) {
+        if (/\?\s*for\s*shortcuts|Try\s*"/i.test(text)) {
+          sent = true
+          buf = ''
+          proc.write('/usage')
+          setTimeout(() => {
+            try {
+              proc.write('\r')
+            } catch {
+              /* probe already ended */
+            }
+          }, 250)
+        }
+        return
+      }
+      if (!settling && parseUsagePanel(buf)) {
+        settling = true // panel is up — give it one more beat to finish rendering
+        setTimeout(() => finish(parseUsagePanel(buf)), 1_200)
+      }
+    }, 400)
+  })
 }
 
 /** CLI args for launching a session's claude process. */

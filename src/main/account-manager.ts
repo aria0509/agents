@@ -109,8 +109,8 @@ export class AccountManager {
     await this.refreshAllAuth()
   }
 
-  /** Re-check login status, then (best-effort) usage. `withUsage=false` skips the
-   *  Keychain read (used for the fast concurrent startup pass). */
+  /** Re-check login status, then (best-effort) usage. `withUsage=false` skips
+   *  the slow /usage probe (used for the fast concurrent startup pass). */
   async refreshAuth(configDir: string, withUsage = true): Promise<void> {
     const account = this.get(configDir)
     if (!account) return
@@ -131,22 +131,24 @@ export class AccountManager {
 
   async refreshUsage(configDir: string): Promise<void> {
     if (process.env['AGENTS_NO_USAGE_FETCH']) return
-    const usage = await fetchUsage(configDir) // best-effort (Keychain/file token)
+    const usage = await fetchUsage(configDir) // best-effort (scrapes claude /usage)
     if (usage) this.update(configDir, { usage })
   }
 
-  /** Startup: auth for everyone concurrently (fast, no Keychain reads). */
+  /** Startup: auth for everyone concurrently (fast, no usage probes). */
   async refreshAllAuth(): Promise<void> {
     await Promise.all(this.list().map((a) => this.refreshAuth(a.configDir, false)))
   }
 
-  /** Usage for every logged-in account, one at a time (each Keychain read may
-   *  prompt once — a queue avoids a storm of dialogs). Called lazily when the
-   *  Settings/accounts view opens, never on startup. */
+  /** Usage for every logged-in account, concurrently (each probe is its own
+   *  claude process). Called lazily when the Settings/accounts view opens,
+   *  never on startup. */
   async refreshAllUsage(): Promise<void> {
-    for (const a of this.list()) {
-      if (a.loginStatus === 'logged_in') await this.refreshUsage(a.configDir)
-    }
+    await Promise.all(
+      this.list()
+        .filter((a) => a.loginStatus === 'logged_in')
+        .map((a) => this.refreshUsage(a.configDir))
+    )
   }
 
   /** Called by SessionManager when a statusline event carries rate_limits. */

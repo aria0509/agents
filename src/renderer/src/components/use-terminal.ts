@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 
 const THEME = {
@@ -34,11 +35,35 @@ export function useTerminal(
       theme: THEME,
       cursorBlink: interactive,
       disableStdin: !interactive,
-      scrollback: interactive ? 5000 : 200
+      scrollback: interactive ? 5000 : 200,
+      smoothScrollDuration: 120, // animate wheel scrolls instead of jumping by lines
+      macOptionClickForcesSelection: true // Option-drag selects even while the TUI captures the mouse
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    // GPU rendering keeps claude's full-screen scroll redraws fluid. Interactive
+    // terminals only — WebGL contexts are a scarce resource (~16 per page), the
+    // small card previews don't need it. Falls back to DOM rendering on failure.
+    let webgl: WebglAddon | undefined
+    const dropWebgl = (): void => {
+      const w = webgl
+      webgl = undefined // once — a second dispose crashes deep in xterm
+      try {
+        w?.dispose()
+      } catch {
+        /* already torn down */
+      }
+    }
+    if (interactive) {
+      try {
+        webgl = new WebglAddon()
+        webgl.onContextLoss(dropWebgl)
+        term.loadAddon(webgl)
+      } catch {
+        webgl = undefined /* no GPU — DOM renderer works */
+      }
+    }
 
     let hydratedTo = -1
     const queue: { data: string; end: number }[] = []
@@ -76,7 +101,12 @@ export function useTerminal(
       unsubscribe()
       disposeInput?.dispose()
       observer?.disconnect()
-      term.dispose()
+      dropWebgl() // must go before term.dispose(), and never twice
+      try {
+        term.dispose()
+      } catch {
+        /* an xterm-internal dispose quirk must never unmount the React root */
+      }
     }
   }, [sessionId, interactive, fontSize, container])
 }

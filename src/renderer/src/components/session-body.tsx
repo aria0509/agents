@@ -14,7 +14,7 @@ export function SessionBody({ sessionId, active, fontSize }: { sessionId: string
   return (
     <div className="min-h-0 flex-1 bg-[#1a1a1a]">
       {/* inactive terminals ignore pointer events so a click activates the card */}
-      <div ref={termRef} className={cn('h-full p-2', !active && 'pointer-events-none')} />
+      <div ref={termRef} className={cn('h-full cursor-text p-2', !active && 'pointer-events-none')} />
     </div>
   )
 }
