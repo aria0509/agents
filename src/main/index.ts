@@ -63,20 +63,20 @@ const QUIT_TEXT: Record<
 const RESTORE_TEXT: Record<string, { message: string; detail: string; yes: string; no: string }> = {
   'zh-Hant': {
     message: '恢復上次的 session？',
-    detail: '上次還有 {n} 個 session 未關閉，要全部恢復嗎？',
-    yes: '全部恢復',
+    detail: '上次結束時有 {n} 個 session 還在執行，要恢復嗎？',
+    yes: '恢復',
     no: '先不用'
   },
   'zh-Hans': {
     message: '恢复上次的 session？',
-    detail: '上次还有 {n} 个 session 未关闭，要全部恢复吗？',
-    yes: '全部恢复',
+    detail: '上次结束时有 {n} 个 session 还在运行，要恢复吗？',
+    yes: '恢复',
     no: '先不用'
   },
   en: {
     message: 'Restore your last sessions?',
-    detail: '{n} session(s) were still open last time. Restore them all?',
-    yes: 'Restore all',
+    detail: '{n} session(s) were still running last time. Restore them?',
+    yes: 'Restore',
     no: 'Not now'
   }
 }
@@ -144,8 +144,8 @@ function bootstrap(): void {
 
   void sessions.hooks.start()
   // stored sessions from a previous run come back as exited cards (click resumes them);
-  // if there were any, offer to resume them all once the window has loaded
-  const restoredCount = sessions.restoreAsExited()
+  // if any were still active last time, offer to resume those once the window has loaded
+  const activeCount = sessions.restoreAsExited()
 
   // refresh auth + usage for every account (usage via the oauth endpoint using
   // each account's Keychain/file token) — non-blocking
@@ -279,7 +279,7 @@ function bootstrap(): void {
   })
 
   const mainWin = windows.createMain()
-  if (restoredCount > 0) {
+  if (activeCount > 0) {
     mainWin.webContents.once('did-finish-load', () => {
       const t = locale(RESTORE_TEXT)
       void dialog
@@ -289,10 +289,10 @@ function bootstrap(): void {
           defaultId: 0,
           cancelId: 1,
           message: t.message,
-          detail: t.detail.replace('{n}', String(restoredCount))
+          detail: t.detail.replace('{n}', String(activeCount))
         })
         .then(({ response }) => {
-          if (response === 0) void sessions.restoreAll()
+          if (response === 0) void sessions.restoreActive()
         })
     })
   }

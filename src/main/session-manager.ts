@@ -42,6 +42,11 @@ export class SessionManager extends EventEmitter {
   private pendingContinue = new Set<string>()
   /** wait-and-continue timers, keyed by session id */
   private resetTimers = new Map<string, NodeJS.Timeout>()
+  /** true during shutdown so pty exits don't rewrite state to 'exited' — we keep
+   *  each session's pre-quit state so the next launch knows which were active */
+  private shuttingDown = false
+  /** ids of sessions that were active (had a live pty) at the previous quit */
+  private restoredActiveIds: string[] = []
 
   constructor(
     private store: AppStore,
@@ -57,6 +62,7 @@ export class SessionManager extends EventEmitter {
     this.hooks.on('event', (ev: HookEvent) => this.onHookEvent(ev))
     this.ptys.on('data', ({ id, data }: { id: string; data: string }) => this.scanOutput(id, data))
     this.ptys.on('exit', ({ id }: { id: string }) => {
+      if (this.shuttingDown) return // quitting: preserve state so restore knows what was active
       // a --resume that exits before SessionStart failed (e.g. transcript gone) → start fresh
       if (this.resuming.has(id)) return void this.resumeFailed(id)
       // an expected kill (switch/restart) clears state itself; unexpected → exited
@@ -71,19 +77,25 @@ export class SessionManager extends EventEmitter {
 
   /**
    * On startup, previous-run sessions come back as exited cards (a click resumes
-   * them). Drop resume info for any whose transcript is gone — an idle session
-   * that never exchanged a message never persisted one, so a `--resume` would
-   * just fail; clearing it makes the click start fresh directly.
+   * them). Records which were active (non-exited = had a live pty last time) so the
+   * caller can offer to restore just those, and returns that count. Drops resume
+   * info for any whose transcript is gone — an idle session that never exchanged a
+   * message never persisted one, so a `--resume` would fail; clearing it makes the
+   * click/restore start fresh directly.
    */
   restoreAsExited(): number {
-    const sessions = this.list().map((s) => ({
-      ...s,
-      poppedOut: false,
-      state: 'exited' as const,
-      ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
-    }))
-    this.store.set('sessions', sessions)
-    return sessions.length
+    const prev = this.list()
+    this.restoredActiveIds = prev.filter((s) => s.state !== 'exited').map((s) => s.id)
+    this.store.set(
+      'sessions',
+      prev.map((s) => ({
+        ...s,
+        poppedOut: false,
+        state: 'exited' as const,
+        ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
+      }))
+    )
+    return this.restoredActiveIds.length
   }
 
   get(id: string): Session | undefined {
@@ -142,9 +154,9 @@ export class SessionManager extends EventEmitter {
     this.ptys.kill(id) // exit handler (id not in `resuming`) marks it exited
   }
 
-  /** Resume every restored (exited) session — the startup "restore last time?" action. */
-  async restoreAll(): Promise<void> {
-    await Promise.all(this.list().map((s) => this.restart(s.id))) // restart no-ops on the already-alive
+  /** Resume the sessions that were active at the last quit — the "restore last time?" action. */
+  async restoreActive(): Promise<void> {
+    await Promise.all(this.restoredActiveIds.map((id) => this.restart(id))) // restart no-ops on the already-alive
   }
 
   /**
@@ -240,6 +252,7 @@ export class SessionManager extends EventEmitter {
   }
 
   shutdown(): void {
+    this.shuttingDown = true // pty exits below must not rewrite state (keep what was active)
     for (const t of this.resetTimers.values()) clearTimeout(t)
     this.ptys.killAll()
     this.hooks.stop()
