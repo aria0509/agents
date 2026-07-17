@@ -5,8 +5,8 @@
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { writeFileSync, mkdirSync, copyFileSync, existsSync, renameSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { writeFileSync, mkdirSync, copyFileSync, existsSync, renameSync, rmSync, mkdtempSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import pty from 'node-pty'
 import type { AccountUsage } from '../shared/types'
@@ -67,6 +67,20 @@ export async function envFor(configDir: string): Promise<Record<string, string>>
   const env = { ...(await loginShellEnv()) }
   if (resolve(configDir) !== join(homedir(), '.claude')) env['CLAUDE_CONFIG_DIR'] = configDir
   return env
+}
+
+let cachedScratchDir: string | null = null
+/**
+ * An empty scratch directory to run `claude` in when we only need to TALK to it
+ * (usage probe, auth login) rather than work in a real project. Running claude in
+ * the user's home makes it scan ~, which trips macOS privacy (TCC) prompts for
+ * Downloads / Music / cloud-provider folders — all attributed to this app. An
+ * empty temp dir has nothing to scan; the account still resolves via the env.
+ * One-time, cached (like noBrowserPath).
+ */
+export function scratchCwd(): string {
+  if (!cachedScratchDir) cachedScratchDir = mkdtempSync(join(tmpdir(), 'agents-cwd-'))
+  return cachedScratchDir
 }
 
 export interface AuthStatus {
@@ -314,7 +328,7 @@ export async function fetchUsage(configDir: string, retry = 1): Promise<AccountU
 
 async function probeUsage(configDir: string): Promise<AccountUsage | null> {
   const [bin, env] = await Promise.all([claudePath(), envFor(configDir)])
-  const proc = pty.spawn(bin, [], { name: 'xterm-256color', cols: 120, rows: 40, cwd: homedir(), env })
+  const proc = pty.spawn(bin, [], { name: 'xterm-256color', cols: 120, rows: 40, cwd: scratchCwd(), env })
   let buf = ''
   let trusted = false
   let sent = false

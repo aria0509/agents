@@ -5,7 +5,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path'
 import type { Account, AccountUsage } from '../shared/types'
 import type { NewAccountInput } from '../shared/ipc'
 import type { AppStore } from './store'
-import { authStatus, claudeLogout, claudePath, envFor, extractLoginUrl, fetchUsage } from './claude-cli'
+import { authStatus, claudeLogout, claudePath, envFor, extractLoginUrl, fetchUsage, scratchCwd } from './claude-cli'
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -224,7 +224,7 @@ export class AccountManager {
     // the pty that receives the pasted code have DIFFERENT OAuth states → "invalid code".
     this.cancelLogin(configDir)
     env['PATH'] = `${this.noBrowserPath()}:${env['PATH'] ?? ''}`
-    const proc = pty.spawn(bin, ['auth', 'login'], { name: 'xterm-256color', cols: 100, rows: 30, cwd: homedir(), env })
+    const proc = pty.spawn(bin, ['auth', 'login'], { name: 'xterm-256color', cols: 100, rows: 30, cwd: scratchCwd(), env })
     this.logins.set(configDir, proc)
     let buf = ''
     let settled = false
