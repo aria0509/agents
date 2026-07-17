@@ -12,6 +12,7 @@ import { HookServer, type HookEvent } from './hook-server'
 import {
   claudePath,
   detectRateLimit,
+  detectUltracode,
   envFor,
   isTrustPrompt,
   moveTranscript,
@@ -261,6 +262,10 @@ export class SessionManager extends EventEmitter {
   // ── internals ──────────────────────────────────────────────────────────
 
   private async spawn(session: Session, opts: { resume: boolean }): Promise<void> {
+    // ultracode is session-only in the CLI — a fresh process starts without it —
+    // and the dead process's tail must not leak detections into this one
+    this.tail.delete(session.id)
+    if (session.effort === 'ultracode') this.update(session.id, { effort: null })
     const settingsDir = join(app.getPath('userData'), 'session-settings')
     const settingsFile = writeSessionSettings(settingsDir, session.id, this.hooks.port)
     const args = sessionArgs({
@@ -299,6 +304,13 @@ export class SessionManager extends EventEmitter {
     if (!this.trusted.has(id) && isTrustPrompt(buf)) {
       this.trusted.add(id)
       setTimeout(() => this.ptys.write(id, '\r'), 500)
+    }
+    // ultracode only — the statusline syncs every plain level itself
+    const uc = detectUltracode(buf)
+    if (uc === true && session.effort !== 'ultracode') {
+      this.update(id, { effort: 'ultracode' })
+    } else if (uc === false && session.effort === 'ultracode') {
+      this.update(id, { effort: null }) // next statusline fills the real level
     }
     if (session.state !== 'rate-limited' && detectRateLimit(buf)) void this.handleRateLimit(id)
   }
@@ -370,6 +382,10 @@ export class SessionManager extends EventEmitter {
         this.setState(sessionId, 'running')
         break
       case 'Stop':
+        // Stop fires at every turn boundary, including the wake-ups background
+        // tasks/agents trigger when they finish. The payload lists still-running
+        // backgrounded work — the SESSION is only done once none remains.
+        if ((payload['background_tasks'] as unknown[] | undefined)?.length) break
         if (session.state !== 'done') {
           this.update(sessionId, { state: 'done' })
           this.emit('notify', { id: sessionId, kind: 'done' })
@@ -387,7 +403,9 @@ export class SessionManager extends EventEmitter {
 
   private onStatusline(session: Session, p: StatuslinePayload): void {
     const model = p.model?.display_name ?? session.model
-    const effort = p.effort?.level ?? session.effort
+    // ultracode reports as plain xhigh here (scanOutput sets/clears the label)
+    const level = p.effort?.level ?? session.effort
+    const effort = session.effort === 'ultracode' && level === 'xhigh' ? 'ultracode' : level
     if (model !== session.model || effort !== session.effort) {
       this.update(session.id, { model, effort })
     }

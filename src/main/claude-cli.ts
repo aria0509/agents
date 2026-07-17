@@ -188,6 +188,30 @@ export function detectNoConversation(text: string): boolean {
 }
 
 /**
+ * Whether ultracode is active, from TUI output — true/false, or null when the
+ * buffer carries no signal. The statusline can't tell (it reports ultracode as
+ * plain xhigh, verified 2.1.212), so state comes from the TUI itself:
+ * ON — the `✦ ultracode` input-box banner, chrome the TUI only renders while the
+ * flag is live (`--resume` transcript replays and scrollback never contain it,
+ * unlike the `/effort` confirmation text, which they DO replay). OFF — a
+ * confirmation of switching to a plain level. Redraws replay older lines in
+ * order, so the LATER of the two signals wins. Case-sensitive on purpose:
+ * conversation text quoting these phrases usually differs in case; a rare exact
+ * quote mislabels only until the next real signal.
+ */
+export function detectUltracode(text: string): boolean | null {
+  const s = stripAnsi(text)
+  const last = (re: RegExp): number => {
+    let i = -1
+    for (const m of s.matchAll(re)) i = m.index
+    return i
+  }
+  const on = last(/✦\s*ultracode/g)
+  const off = last(/Set\s*effort\s*level\s*to\s*(?:low|medium|high|xhigh|max)\b|Effort\s*level\s*set\s*to\s*auto/g)
+  return on < 0 && off < 0 ? null : on > off
+}
+
+/**
  * Extract the OAuth sign-in URL from `claude auth login` output. The CLI emits it
  * as an OSC-8 terminal hyperlink (`ESC ] 8 ; ; <url> BEL`) — read the URL straight
  * out of that escape so we get one clean copy (the visible text repeats it).
