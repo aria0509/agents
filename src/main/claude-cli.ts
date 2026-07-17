@@ -66,6 +66,11 @@ export async function claudePath(): Promise<string> {
 export async function envFor(configDir: string): Promise<Record<string, string>> {
   const env = { ...(await loginShellEnv()) }
   if (resolve(configDir) !== join(homedir(), '.claude')) env['CLAUDE_CONFIG_DIR'] = configDir
+  // suppress the "resume from summary?" dialog on old/large `--resume`s (2.1.212:
+  // shown past 70min/100k-token thresholds) — it blocks unattended restore, and a
+  // queued auto-"continue" could confirm its default and /compact the session
+  env['CLAUDE_CODE_RESUME_THRESHOLD_MINUTES'] = '999999999'
+  env['CLAUDE_CODE_RESUME_TOKEN_THRESHOLD'] = '999999999'
   return env
 }
 
