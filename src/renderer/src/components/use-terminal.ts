@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -22,8 +22,6 @@ export function useTerminal(
   opts: { interactive: boolean; fontSize?: number }
 ): void {
   const { interactive, fontSize = 13 } = opts
-  const optsRef = useRef(opts)
-  optsRef.current = opts
 
   useEffect(() => {
     const el = container.current
@@ -36,7 +34,9 @@ export function useTerminal(
       cursorBlink: interactive,
       disableStdin: !interactive,
       scrollback: interactive ? 5000 : 200,
-      smoothScrollDuration: 120, // animate wheel scrolls instead of jumping by lines
+      // no smoothScrollDuration: with native-scrollback scrolling (claude
+      // 2.1.216+) a trackpad emits dozens of tiny deltas per second and each
+      // would restart the animation — laggy rubber-banding instead of smooth
       macOptionClickForcesSelection: true // Option-drag selects even while the TUI captures the mouse
     })
     const fit = new FitAddon()
@@ -68,16 +68,31 @@ export function useTerminal(
     let hydratedTo = -1
     const queue: { data: string; end: number }[] = []
 
+    // Card previews use the DOM renderer, and a running claude redraws its
+    // screen constantly — coalesce their writes to ~10fps so a grid of live
+    // cards leaves the main thread free for the active terminal's scrolling.
+    let previewBuf = ''
+    let previewTimer: number | undefined
+    const write = (data: string): void => {
+      if (interactive) return void term.write(data)
+      previewBuf += data
+      previewTimer ??= window.setTimeout(() => {
+        previewTimer = undefined
+        term.write(previewBuf)
+        previewBuf = ''
+      }, 100)
+    }
+
     const unsubscribe = window.api.onPtyData((ev) => {
       if (ev.id !== sessionId) return
       if (hydratedTo < 0) queue.push(ev)
-      else if (ev.end > hydratedTo) term.write(ev.data)
+      else if (ev.end > hydratedTo) write(ev.data)
     })
 
     void window.api.ptySnapshot(sessionId).then((snap) => {
       term.write(snap.data)
       hydratedTo = snap.end
-      for (const ev of queue) if (ev.end > hydratedTo) term.write(ev.data)
+      for (const ev of queue) if (ev.end > hydratedTo) write(ev.data)
       queue.length = 0
     })
 
@@ -99,6 +114,7 @@ export function useTerminal(
 
     return () => {
       unsubscribe()
+      clearTimeout(previewTimer)
       disposeInput?.dispose()
       observer?.disconnect()
       dropWebgl() // must go before term.dispose(), and never twice

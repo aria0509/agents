@@ -1,5 +1,6 @@
-import { BrowserWindow, shell } from 'electron'
+import { BrowserWindow, screen, shell } from 'electron'
 import { join } from 'node:path'
+import { EVENT_PTY_DATA, type PtyDataEvent } from '../shared/ipc'
 
 function baseOptions(): Electron.BrowserWindowConstructorOptions {
   return {
@@ -48,7 +49,18 @@ export class WindowManager {
   popOut(sessionId: string): void {
     const existing = this.popouts.get(sessionId)
     if (existing) return this.focusPoppedOut(sessionId)
-    const win = new BrowserWindow({ ...baseOptions(), width: 900, height: 680 })
+    // open centered on the display the user is working on (multi-monitor:
+    // the cursor is where they just clicked the pop-out button)
+    const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    const width = Math.min(900, workArea.width)
+    const height = Math.min(680, workArea.height)
+    const win = new BrowserWindow({
+      ...baseOptions(),
+      width,
+      height,
+      x: Math.round(workArea.x + (workArea.width - width) / 2),
+      y: Math.round(workArea.y + (workArea.height - height) / 2)
+    })
     this.load(win, `session=${sessionId}`)
     this.popouts.set(sessionId, win)
     this.onPopoutChange(sessionId, true)
@@ -81,9 +93,16 @@ export class WindowManager {
     this.main.focus()
   }
 
-  /** Send to every window (state/pty streams flow to pop-outs too). */
+  /** Send to every window (state changes flow to pop-outs too). */
   broadcast(channel: string, payload: unknown): void {
     for (const win of BrowserWindow.getAllWindows()) win.webContents.send(channel, payload)
+  }
+
+  /** Pty output goes to the grid plus that session's own pop-out only. */
+  sendPty(ev: PtyDataEvent): void {
+    for (const win of [this.main, this.popouts.get(ev.id)]) {
+      if (win && !win.isDestroyed()) win.webContents.send(EVENT_PTY_DATA, ev)
+    }
   }
 
   sendToMain(channel: string, payload: unknown): void {

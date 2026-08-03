@@ -35,13 +35,27 @@ export async function loginShellEnv(): Promise<Record<string, string>> {
       env[lastKey] += '\n' + line // multiline value continuation
     }
   }
-  // Strip every marker of the *launching* claude session. If the app itself is
-  // started from inside a Claude Code session, the login shell inherits vars
-  // like CLAUDE_CODE_SESSION_ID / CLAUDECODE / AI_AGENT; a claude we spawn would
-  // see them and quietly exit as a "nested" session. We set CLAUDE_CONFIG_DIR
-  // ourselves per account, so drop any inherited one too.
+  // Strip every marker of the *launching* environment. Claude-session vars
+  // (CLAUDE_CODE_SESSION_ID / CLAUDECODE / AI_AGENT) make a spawned claude
+  // quietly exit as a "nested" session. Terminal-identity vars (TERM_PROGRAM,
+  // CURSOR_TRACE_ID, ITERM_* …) leak whichever terminal launched the app and
+  // make claude misdetect its host — e.g. TERM_PROGRAM=vscode triggers a VS
+  // Code extension auto-install that fails. This app IS the terminal; the
+  // launcher's identity is always wrong. CLAUDE_CONFIG_DIR is set per account.
   for (const key of Object.keys(env)) {
-    if (/^(CLAUDE|CLAUDECODE|ANTHROPIC|AI_AGENT)/.test(key)) delete env[key]
+    if (
+      /^(CLAUDE|CLAUDECODE|ANTHROPIC|AI_AGENT|VSCODE_|ITERM_|GHOSTTY_|KITTY_|WT_|TERM_PROGRAM|CURSOR_TRACE_ID|TERMINAL_EMULATOR|LC_TERMINAL)/.test(
+        key
+      )
+    ) {
+      delete env[key]
+    }
+  }
+  // GIT_ASKPASS/SSH_ASKPASS from a VS Code/Cursor terminal is a shim that shells
+  // out to the VSCODE_GIT_ASKPASS_* vars we just stripped — left alone it fails on
+  // every auth prompt. Drop it so git falls back cleanly to its credential helper.
+  for (const key of ['GIT_ASKPASS', 'SSH_ASKPASS']) {
+    if (/vscode|cursor/i.test(env[key] ?? '')) delete env[key]
   }
   cachedEnv = env
   return env
@@ -185,11 +199,6 @@ export function isTrustPrompt(text: string): boolean {
   return /trust\s*this\s*folder|Security\s*guide|safety\s*check|created\s*or\s*one\s*you\s*trust|Do\s*you\s*trust/i.test(
     stripAnsi(text)
   )
-}
-
-/** `claude --resume <id>` failed because the transcript is gone/incompatible. */
-export function detectNoConversation(text: string): boolean {
-  return /No\s*conversation\s*found/i.test(stripAnsi(text))
 }
 
 /**
@@ -377,9 +386,13 @@ export function sessionArgs(opts: {
   settingsFile: string
   launchArgs: string
   resumeSessionId?: string | null
+  model?: string | null
 }): string[] {
   const args = ['--settings', opts.settingsFile]
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId)
+  // restore the session's model at launch (per-session, no persisted default) —
+  // a `/model` slash command would instead pop a "re-read history?" confirm dialog
+  if (opts.model) args.push('--model', opts.model)
   const extra = opts.launchArgs.trim()
   if (extra) args.push(...extra.split(/\s+/))
   return args

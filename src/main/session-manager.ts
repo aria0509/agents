@@ -23,6 +23,15 @@ import {
 /** utilization at/above which we proactively switch before submitting */
 const SWITCH_THRESHOLD = 95
 
+/** SGR + legacy mouse reports and focus in/out — terminal chatter, not typing */
+const MOUSE_OR_FOCUS = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[[IO]/g
+
+/** True if a pty write carries real keyboard input (anything once mouse/focus
+ *  reports are removed) rather than being pure mouse/focus chatter. */
+function isKeyboardInput(data: string): boolean {
+  return data.replace(MOUSE_OR_FOCUS, '').length > 0
+}
+
 interface StatuslinePayload {
   model?: { id?: string; display_name?: string }
   effort?: { level?: string }
@@ -41,6 +50,15 @@ export class SessionManager extends EventEmitter {
   readonly hooks: HookServer
   /** sessions awaiting a "continue" once their (re)started claude is ready */
   private pendingContinue = new Set<string>()
+  /** sessions to put back into ultracode once their (re)started claude is ready —
+   *  the CLI flag is session-only and never survives a new process */
+  private pendingUltracode = new Set<string>()
+  /** earliest time the next auto-submit may fire, per session — staggers the
+   *  restore submits (ultracode/continue) so their bracketed pastes never merge */
+  private nextAutoSubmitAt = new Map<string, number>()
+  /** pending auto-submit timers per session, so a kill/respawn inside the
+   *  stagger window can cancel them — else they'd paste into the NEXT process */
+  private autoSubmitTimers = new Map<string, Set<NodeJS.Timeout>>()
   /** wait-and-continue timers, keyed by session id */
   private resetTimers = new Map<string, NodeJS.Timeout>()
   /** true during shutdown so pty exits don't rewrite state to 'exited' — we keep
@@ -129,7 +147,8 @@ export class SessionManager extends EventEmitter {
       order: Math.max(0, ...this.list().map((s) => s.order + 1)),
       poppedOut: false,
       model: null,
-      effort: null
+      effort: null,
+      modelId: null
     }
     this.store.set('sessions', [...this.list(), session])
     await this.spawn(session, { resume: false })
@@ -151,7 +170,12 @@ export class SessionManager extends EventEmitter {
    */
   stop(id: string): void {
     this.clearResetTimer(id)
+    this.clearAutoSubmit(id)
     this.pendingContinue.delete(id)
+    this.pendingUltracode.delete(id)
+    // a stop during a --resume boot must read as a stop, not a failed resume
+    // (else the exit handler wipes resume info and respawns a fresh session)
+    this.resuming.delete(id)
     this.ptys.kill(id) // exit handler (id not in `resuming`) marks it exited
   }
 
@@ -178,6 +202,9 @@ export class SessionManager extends EventEmitter {
     this.tail.delete(id)
     this.trusted.delete(id)
     this.resuming.delete(id)
+    this.pendingContinue.delete(id)
+    this.pendingUltracode.delete(id)
+    this.clearAutoSubmit(id)
     this.ptys.kill(id)
     this.store.set(
       'sessions',
@@ -241,7 +268,10 @@ export class SessionManager extends EventEmitter {
   }
 
   write(id: string, data: string): void {
-    this.clearFinished(id)
+    // clicking/scrolling a mouse-tracking terminal (claude's pinned mode) writes
+    // mouse/focus reports — those aren't the user re-engaging, so they must not
+    // clear a done/needs-attention badge just because the user glanced at the card
+    if (isKeyboardInput(data)) this.clearFinished(id)
     this.ptys.write(id, data)
   }
 
@@ -263,17 +293,35 @@ export class SessionManager extends EventEmitter {
 
   private async spawn(session: Session, opts: { resume: boolean }): Promise<void> {
     // ultracode is session-only in the CLI — a fresh process starts without it —
-    // and the dead process's tail must not leak detections into this one
+    // and the dead process's tail must not leak detections into this one.
+    // Remember the intent and re-apply once the new process is ready; the label
+    // must still reset now so a failed re-apply can't leave it lying.
     this.tail.delete(session.id)
-    if (session.effort === 'ultracode') this.update(session.id, { effort: null })
+    this.clearAutoSubmit(session.id) // cancel any restore submits from a prior incarnation
+    if (session.effort === 'ultracode') {
+      this.pendingUltracode.add(session.id)
+      this.update(session.id, { effort: null })
+    }
     const settingsDir = join(app.getPath('userData'), 'session-settings')
     const settingsFile = writeSessionSettings(settingsDir, session.id, this.hooks.port)
     const args = sessionArgs({
       settingsFile,
       launchArgs: session.launchArgs.join(' '),
-      resumeSessionId: opts.resume ? session.claudeSessionId : null
+      resumeSessionId: opts.resume ? session.claudeSessionId : null,
+      // resume on the same model; a fresh (non-resume) session keeps CLI default
+      model: opts.resume ? session.modelId : null
     })
     const env = await envFor(session.accountDir)
+    // Pinned input box + captured wheel scrolling (claude's alt-screen TUI) is
+    // env/settings/statsig-gated, not terminal-detected — force it on so every
+    // session scrolls content with the footer fixed, like claude in iTerm2.
+    env['CLAUDE_CODE_NO_FLICKER'] = '1'
+    // claude identifies xterm.js via an XTVERSION reply (which use-terminal
+    // provides) — do NOT spoof TERM_PROGRAM=vscode for this: claude then tries
+    // to auto-install its VS Code extension and surfaces an install error.
+    // Hard-off auto IDE connect too: a stored autoConnectIde setting (from the
+    // user's real IDE usage) would otherwise trigger the same failed install.
+    env['CLAUDE_CODE_AUTO_CONNECT_IDE'] = 'false'
     this.ptys.spawn(session.id, await claudePath(), args, { cwd: session.cwd, env })
   }
 
@@ -298,8 +346,12 @@ export class SessionManager extends EventEmitter {
   private scanOutput(id: string, data: string): void {
     const session = this.get(id)
     if (!session) return
-    const buf = ((this.tail.get(id) ?? '') + data).slice(-3000)
-    this.tail.set(id, buf)
+    // scan the WHOLE (tail + data): pty output is coalesced up to 64KB/chunk, so
+    // slicing to 3000 before scanning would blind us to a draw-once signal (the
+    // ✦ ultracode banner) buried in the middle of a big --resume replay chunk.
+    // Only the retained tail is capped (3000 is enough to bridge a split token).
+    const buf = (this.tail.get(id) ?? '') + data
+    this.tail.set(id, buf.slice(-3000))
     // auto-confirm claude's first-run "trust this folder" prompt (pre-selected Yes)
     if (!this.trusted.has(id) && isTrustPrompt(buf)) {
       this.trusted.add(id)
@@ -373,10 +425,9 @@ export class SessionManager extends EventEmitter {
           claudeSessionId: (payload['session_id'] as string) ?? session.claudeSessionId,
           transcriptPath: (payload['transcript_path'] as string) ?? session.transcriptPath
         })
-        if (this.pendingContinue.delete(sessionId)) {
-          // give the resumed TUI a moment to accept input
-          setTimeout(() => this.ptys.submit(sessionId, 'continue'), 1500)
-        }
+        // restore ultracode before any queued "continue" runs a turn on it
+        if (this.pendingUltracode.delete(sessionId)) this.autoSubmit(sessionId, '/effort ultracode')
+        if (this.pendingContinue.delete(sessionId)) this.autoSubmit(sessionId, 'continue')
         break
       case 'UserPromptSubmit':
         this.setState(sessionId, 'running')
@@ -403,11 +454,12 @@ export class SessionManager extends EventEmitter {
 
   private onStatusline(session: Session, p: StatuslinePayload): void {
     const model = p.model?.display_name ?? session.model
+    const modelId = p.model?.id ?? session.modelId
     // ultracode reports as plain xhigh here (scanOutput sets/clears the label)
     const level = p.effort?.level ?? session.effort
     const effort = session.effort === 'ultracode' && level === 'xhigh' ? 'ultracode' : level
-    if (model !== session.model || effort !== session.effort) {
-      this.update(session.id, { model, effort })
+    if (model !== session.model || effort !== session.effort || modelId !== session.modelId) {
+      this.update(session.id, { model, effort, modelId })
     }
     const rl = p.rate_limits
     if (rl?.five_hour || rl?.seven_day) {
@@ -418,6 +470,31 @@ export class SessionManager extends EventEmitter {
         weeklyResetsAt: rl.seven_day?.resets_at ? rl.seven_day.resets_at * 1000 : null
       })
     }
+  }
+
+  /**
+   * Submit a restore command (ultracode/continue) to a freshly (re)started
+   * claude: waits 1.5s for the TUI to accept input, and spaces consecutive
+   * submits ≥1.5s apart — bracketed pastes sent closer together merge into one
+   * garbled input line. Timers are tracked so a kill/respawn inside the window
+   * cancels them (clearAutoSubmit) rather than pasting into the next process.
+   */
+  private autoSubmit(id: string, text: string): void {
+    const at = Math.max(Date.now() + 1500, this.nextAutoSubmitAt.get(id) ?? 0)
+    this.nextAutoSubmitAt.set(id, at + 1500)
+    const timers = this.autoSubmitTimers.get(id) ?? new Set()
+    this.autoSubmitTimers.set(id, timers)
+    const timer = setTimeout(() => {
+      timers.delete(timer)
+      this.ptys.submit(id, text)
+    }, at - Date.now())
+    timers.add(timer)
+  }
+
+  private clearAutoSubmit(id: string): void {
+    for (const t of this.autoSubmitTimers.get(id) ?? []) clearTimeout(t)
+    this.autoSubmitTimers.delete(id)
+    this.nextAutoSubmitAt.delete(id)
   }
 
   /** typing into a finished session brings it back to plain idle */

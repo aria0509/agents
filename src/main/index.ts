@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto'
 import {
   EVENT_FOCUS_SESSION,
   EVENT_OPEN_SETTINGS,
-  EVENT_PTY_DATA,
   EVENT_STATE,
   ipcChannel,
   type AppState,
@@ -121,7 +120,7 @@ function bootstrap(): void {
     recentLaunchArgs: store.get('recentLaunchArgs') ?? []
   })
 
-  sessions.ptys.on('data', (ev) => windows.broadcast(EVENT_PTY_DATA, ev))
+  sessions.ptys.on('data', (ev) => windows.sendPty(ev))
 
   sessions.on('notify', ({ id, kind }: { id: string; kind: NotifyKind }) => {
     if (kind === 'done' && windows.anyFocused()) return
@@ -147,8 +146,8 @@ function bootstrap(): void {
   // if any were still active last time, offer to resume those once the window has loaded
   const activeCount = sessions.restoreAsExited()
 
-  // refresh auth + usage for every account (usage via the oauth endpoint using
-  // each account's Keychain/file token) — non-blocking
+  // refresh auth for every account — non-blocking (usage is probed separately by
+  // scraping each account's own /usage panel; see fetchUsage in claude-cli)
   void accounts.refreshAllAuth()
 
   // app/dock icon (packaging uses assets/icon.png too; this covers dev)

@@ -8,6 +8,19 @@ import { EventEmitter } from 'node:events'
 import type { PtySnapshot } from '../shared/ipc'
 
 const BUFFER_CAP = 400_000 // chars per session
+// claude probes XTVERSION (CSI > q, param empty/0) to pick its xterm.js wheel
+// handling; xterm.js 5.5 never answers, so we reply on its behalf with the DCS
+// version string. Answered here on the LIVE stream (each match is a real query)
+// — NOT in the renderer, where remounts replay the ring buffer and would re-answer
+// a stale query into claude's stdin mid-conversation.
+const XTVERSION_QUERY = /\x1b\[>0?q/
+const XTVERSION_REPLY = '\x1bP>|xterm.js(5.5.0)\x1b\\'
+// Coalesce pty reads before emitting: claude's full-screen redraws (wheel
+// scrolling in-conversation) arrive as storms of tiny chunks; merging them
+// means one IPC message + one whole-frame xterm write instead of dozens of
+// partial ones. 5ms is imperceptible on echo but spans a full redraw burst.
+const FLUSH_MS = 5
+const FLUSH_MAX = 65_536
 
 interface Entry {
   proc: pty.IPty
@@ -17,6 +30,8 @@ interface Entry {
   end: number
   cols: number
   rows: number
+  pending: string
+  flushTimer?: NodeJS.Timeout
 }
 
 export class PtyManager extends EventEmitter {
@@ -37,22 +52,37 @@ export class PtyManager extends EventEmitter {
       cwd: opts.cwd,
       env: opts.env
     })
-    const entry: Entry = { proc, chunks: [], buffered: 0, end: 0, cols, rows }
+    const entry: Entry = { proc, chunks: [], buffered: 0, end: 0, cols, rows, pending: '' }
     this.entries.set(id, entry)
 
     proc.onData((data) => {
+      if (XTVERSION_QUERY.test(data)) proc.write(XTVERSION_REPLY)
       entry.chunks.push(data)
       entry.buffered += data.length
       entry.end += data.length
       while (entry.buffered > BUFFER_CAP && entry.chunks.length > 1) {
         entry.buffered -= entry.chunks.shift()!.length
       }
-      this.emit('data', { id, data, end: entry.end })
+      entry.pending += data
+      if (entry.pending.length >= FLUSH_MAX) this.flush(id, entry)
+      else if (!entry.flushTimer) entry.flushTimer = setTimeout(() => this.flush(id, entry), FLUSH_MS)
     })
     proc.onExit(({ exitCode }) => {
+      this.flush(id, entry) // trailing output must land before the exit event
       this.entries.delete(id)
       this.emit('exit', { id, exitCode })
     })
+  }
+
+  private flush(id: string, entry: Entry): void {
+    if (entry.flushTimer) {
+      clearTimeout(entry.flushTimer)
+      entry.flushTimer = undefined
+    }
+    if (!entry.pending) return
+    const data = entry.pending
+    entry.pending = ''
+    this.emit('data', { id, data, end: entry.end })
   }
 
   isAlive(id: string): boolean {
@@ -93,6 +123,9 @@ export class PtyManager extends EventEmitter {
   snapshot(id: string): PtySnapshot {
     const e = this.entries.get(id)
     if (!e) return { data: '', end: 0 }
+    // flush first so emitted chunk boundaries never straddle a snapshot —
+    // followers dedupe purely by comparing `end` offsets
+    this.flush(id, e)
     return { data: e.chunks.join(''), end: e.end }
   }
 

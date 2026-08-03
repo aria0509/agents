@@ -83,6 +83,8 @@ export interface Session {
   /** last known values reported by the injected statusline */
   model: string | null
   effort: string | null
+  /** model id (e.g. claude-fable-5) — used to restore the model on resume */
+  modelId: string | null
 }
 
 export type Theme = 'light' | 'dark' | 'system'
