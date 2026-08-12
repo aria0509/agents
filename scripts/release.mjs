@@ -66,10 +66,13 @@ try {
   /* no release yet */
 }
 if (published?.version === version) die(`version ${version} is already published — bump package.json first`)
-if (!full && !published) die('no published release found — the first release must be --full')
+if (!full && !published) die('no published update manifest found — the first updater release must be --full')
 if (!full && published.runtime !== runtime) {
   die(`native runtime changed (${published.runtime} → ${runtime}) — this release must be --full`)
 }
+// pre-manifest-era releases exist too (manual ones) — refuse any taken tag before building
+const tagTaken = (await fetch(`https://api.github.com/repos/${repo}/releases/tags/v${version}`)).ok
+if (tagTaken) die(`a v${version} release already exists on GitHub — bump package.json first`)
 
 // ── build ───────────────────────────────────────────────────────────────────
 const SIGN_OVERRIDES = ['-c.mac.identity=null', '-c.mac.notarize=false']
@@ -93,11 +96,13 @@ if (full) {
   // arm64 (the host) goes last so node_modules is left usable for dev.
   for (const arch of ['x64', 'arm64']) {
     run('pnpm', ['exec', 'electron-rebuild', '-f', '-w', 'node-pty', '--arch', arch])
-    run('pnpm', ['exec', 'electron-builder', '--mac', `--${arch}`, ...SIGN_OVERRIDES])
+    // --publish never: with GH_TOKEN in the env (CI), electron-builder's own
+    // GitHub publisher would kick in and fight the gh upload below
+    run('pnpm', ['exec', 'electron-builder', '--mac', `--${arch}`, '--publish', 'never', ...SIGN_OVERRIDES])
     verifyNativeArch(arch)
   }
 } else {
-  run('pnpm', ['exec', 'electron-builder', '--mac', '--dir', ...SIGN_OVERRIDES])
+  run('pnpm', ['exec', 'electron-builder', '--mac', '--dir', '--publish', 'never', ...SIGN_OVERRIDES])
 }
 
 // the asar is pure JS — identical across arches; take it from whichever app exists
@@ -145,8 +150,7 @@ try {
   run('gh', ['release', 'create', `v${version}`, ...assets, '--title', `v${version}`, '--notes', manifest.notes])
   console.log(`\npublished: https://github.com/${repo}/releases/tag/v${version}`)
 } catch {
-  console.error('\ngh upload failed (not logged in?). Publish manually:')
-  console.error(`  gh auth login`)
+  console.error('\ngh release create failed (see above). Publish manually once fixed:')
   console.error(`  gh release create v${version} ${assets.map((a) => `'${a}'`).join(' ')} --title v${version} --notes '…'`)
   process.exit(1)
 }
