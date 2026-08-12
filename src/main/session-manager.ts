@@ -3,7 +3,7 @@ import { app } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
-import type { Session, SessionState } from '../shared/types'
+import type { AccountUsage, Session, SessionState } from '../shared/types'
 import type { NewSessionInput, SessionConfigPatch, SessionView } from '../shared/ipc'
 import { pushRecentLaunchArgs, type AppStore } from './store'
 import type { AccountManager } from './account-manager'
@@ -325,13 +325,13 @@ export class SessionManager extends EventEmitter {
     this.ptys.spawn(session.id, await claudePath(), args, { cwd: session.cwd, env })
   }
 
-  /** If auto-switch and the current account is near its cap, switch first. */
+  /** If auto-switch and any of the account's limit windows is near its cap,
+   *  switch first rather than burning the submit on a doomed account. */
   private async maybeSwitchBeforeSubmit(id: string): Promise<void> {
     const session = this.get(id)
     if (!session || session.limitRule !== 'auto-switch') return
     const account = this.accounts.get(session.accountDir)
-    const used = account?.usage.fiveHour
-    if (used == null || used < SWITCH_THRESHOLD) return
+    if (!account || this.accounts.worstUsedPct(account) < SWITCH_THRESHOLD) return
     const target = this.accounts.pickWithHeadroom(session.accountDir)
     if (target) await this.switchAccount(id, target.configDir, { continueAfter: false })
   }
@@ -372,6 +372,9 @@ export class SessionManager extends EventEmitter {
     const session = this.get(id)
     if (!session) return
     this.setState(id, 'rate-limited')
+    // the banner is ground truth — keep this account out of the rotation until
+    // its window resets (and probe its real numbers in the background)
+    this.accounts.markRateLimited(session.accountDir)
 
     switch (session.limitRule) {
       case 'manual':
@@ -437,6 +440,8 @@ export class SessionManager extends EventEmitter {
         // tasks/agents trigger when they finish. The payload lists still-running
         // backgrounded work — the SESSION is only done once none remains.
         if ((payload['background_tasks'] as unknown[] | undefined)?.length) break
+        // a limit banner also ends the turn — don't repaint rate-limited as done
+        if (session.state === 'rate-limited') break
         if (session.state !== 'done') {
           this.update(sessionId, { state: 'done' })
           this.emit('notify', { id: sessionId, kind: 'done' })
@@ -461,15 +466,19 @@ export class SessionManager extends EventEmitter {
     if (model !== session.model || effort !== session.effort || modelId !== session.modelId) {
       this.update(session.id, { model, effort, modelId })
     }
+    // both windows are optional in the payload — patch only what's present, so
+    // a five_hour-only event can't wipe the weekly numbers (or vice versa)
     const rl = p.rate_limits
-    if (rl?.five_hour || rl?.seven_day) {
-      this.accounts.updateUsage(session.accountDir, {
-        fiveHour: rl.five_hour?.used_percentage ?? null,
-        weekly: rl.seven_day?.used_percentage ?? null,
-        resetsAt: rl.five_hour?.resets_at ? rl.five_hour.resets_at * 1000 : null,
-        weeklyResetsAt: rl.seven_day?.resets_at ? rl.seven_day.resets_at * 1000 : null
-      })
+    const u: Partial<AccountUsage> = {}
+    if (rl?.five_hour) {
+      u.fiveHour = rl.five_hour.used_percentage ?? null
+      u.resetsAt = rl.five_hour.resets_at ? rl.five_hour.resets_at * 1000 : null
     }
+    if (rl?.seven_day) {
+      u.weekly = rl.seven_day.used_percentage ?? null
+      u.weeklyResetsAt = rl.seven_day.resets_at ? rl.seven_day.resets_at * 1000 : null
+    }
+    if (Object.keys(u).length) this.accounts.updateUsage(session.accountDir, u)
   }
 
   /**

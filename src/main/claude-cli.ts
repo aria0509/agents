@@ -6,8 +6,8 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { writeFileSync, mkdirSync, copyFileSync, existsSync, renameSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import pty from 'node-pty'
 import type { AccountUsage } from '../shared/types'
 
@@ -86,6 +86,25 @@ export async function envFor(configDir: string): Promise<Record<string, string>>
   env['CLAUDE_CODE_RESUME_THRESHOLD_MINUTES'] = '999999999'
   env['CLAUDE_CODE_RESUME_TOKEN_THRESHOLD'] = '999999999'
   return env
+}
+
+let cachedScratchCwd: string | null = null
+/**
+ * An empty directory to run `claude` in when we only need to TALK to it (usage
+ * probe, auth login) rather than work in a project. Running claude in ~ makes
+ * it scan the home dir and trips macOS privacy (TCC) prompts — Downloads,
+ * Music, OneDrive — all attributed to this app (idea from PR #1). The path must
+ * be STABLE across launches: folder trust is recorded per-path in each
+ * account's .claude.json, so a fresh mkdtemp per run would re-prompt every
+ * launch and grow that file forever. tmpdir() is per-user-stable on macOS; its
+ * contents may be purged, so recreate on demand.
+ */
+export function scratchCwd(): string {
+  if (!cachedScratchCwd) {
+    cachedScratchCwd = join(tmpdir(), 'agents-scratch-cwd')
+    mkdirSync(cachedScratchCwd, { recursive: true })
+  }
+  return cachedScratchCwd
 }
 
 export interface AuthStatus {
@@ -179,12 +198,19 @@ function stripAnsi(text: string): string {
 }
 
 /**
- * Whether a chunk of pty output indicates the account hit its usage limit.
- * Wording lives here so a CLI change is a one-line fix. Kept broad on purpose.
+ * Whether a chunk of pty output indicates the account hit a usage limit.
+ * 2.1.228 composes banners as `You've hit your <window> limit` (window ∈
+ * session/weekly/Opus/Sonnet/Fable 5/usage credit) plus out-of-credit variants;
+ * "fast limit" is only the fast-mode cooldown (the session keeps working on the
+ * normal lane) and must NOT match. Older wordings kept for older CLIs. Wording
+ * lives here so a CLI change is a one-line fix.
  */
 export function detectRateLimit(text: string): boolean {
-  return /(usage\s*limit\s*reached|reached\s*your\s*usage\s*limit|5-hour\s*limit\s*reached|weekly\s*limit\s*reached|Claude\s*usage\s*limit)/i.test(
-    stripAnsi(text)
+  const s = stripAnsi(text)
+  return (
+    /You.?ve\s*(?:hit|reached)\s*your\s*(?!\s*fast)[\w .$'-]{2,30}?limit|You.?re\s*out\s*of\s*(?:usage\s*credits|extra\s*usage)|Your\s*org\s*is\s*out\s*of\s*usage/i.test(
+      s
+    ) || /usage\s*limit\s*reached|5-hour\s*limit\s*reached|weekly\s*limit\s*reached|Claude\s*usage\s*limit/i.test(s)
   )
 }
 
@@ -260,53 +286,64 @@ function parseResetTime(s: string): number | null {
   return d.getTime()
 }
 
-/** "<header> … N% used … Resets <when>", scoped to before the next section
- *  header so a section missing its own "Resets" line (0% windows have none)
- *  doesn't pick up the neighbour's. */
-function usageSection(text: string, header: RegExp): { percent: number | null; resetsAt: number | null } {
-  const m = header.exec(text)
-  if (!m) return { percent: null, resetsAt: null }
-  let tail = text.slice(m.index + m[0].length, m.index + m[0].length + 500)
-  const next = /Current\s*(session|week)/i.exec(tail)
+interface UsageSection {
+  percent: number | null
+  resetsAt: number | null
+}
+
+/** Read one section's "N% used … Resets <when>" from the text right after its
+ *  header (at `start`), scoped to before the next section so a section missing
+ *  its own "Resets" line (0% windows have none) doesn't pick up the neighbour's,
+ *  and so the footer's "N% of your usage…" lines can't bleed in. Values only
+ *  overwrite `into` when present — a partial repaint keeps an earlier render's. */
+function readSection(clean: string, start: number, into: UsageSection): void {
+  let tail = clean.slice(start, start + 400)
+  const next = /Current\s*(session|week)|What.s\s*contributing|Usage\s*credits/i.exec(tail)
   if (next) tail = tail.slice(0, next.index)
   const used = /(\d{1,3})\s*%\s*used/i.exec(tail)
+  if (!used) return
+  into.percent = parseInt(used[1], 10)
   const resets = /Resets\s*([^()\n]{1,40})/i.exec(tail)
-  return {
-    percent: used ? parseInt(used[1], 10) : null,
-    resetsAt: resets ? parseResetTime(resets[1]) : null
-  }
+  if (resets) into.resetsAt = parseResetTime(resets[1])
 }
 
 /**
- * Parse the /usage panel out of accumulated TUI output. The TUI redraws, so the
- * buffer holds several renders — parse only the last one. Returns null until
- * both the session and weekly sections have rendered their percentages.
+ * Parse the /usage panel out of accumulated TUI output. The TUI repaints only
+ * changed lines, so ANY render — including the newest — can be partial: a
+ * section's header and its numbers may never appear together in the final frame
+ * (seen live: the last repaint of the Fable row was just `Fable)…67`, header
+ * gone). So never slice to "the last render"; instead walk EVERY occurrence of
+ * each header across the whole buffer and let the newest one that carries a
+ * value win. Returns null until both the session and weekly sections have
+ * rendered their percentages.
  */
 export function parseUsagePanel(raw: string): AccountUsage | null {
   const clean = stripAnsi(raw)
-  let last = -1
-  for (let m, re = /Current\s*session/gi; (m = re.exec(clean)); ) last = m.index
-  if (last < 0) return null
-  const text = clean.slice(last)
-
-  const session = usageSection(text, /Current\s*session/i)
-  const weekly = usageSection(text, /Current\s*week\s*\(\s*all\s*models\s*\)/i)
+  const session: UsageSection = { percent: null, resetsAt: null }
+  const weekly: UsageSection = { percent: null, resetsAt: null }
+  for (const m of clean.matchAll(/Current\s*session/gi)) readSection(clean, m.index + m[0].length, session)
+  for (const m of clean.matchAll(/Current\s*week\s*\(\s*all\s*models\s*\)/gi))
+    readSection(clean, m.index + m[0].length, weekly)
   if (session.percent === null || weekly.percent === null) return null
 
-  // partial TUI redraws can repeat a section — the Map keeps the last (newest)
-  const models = new Map<string, number>()
-  for (let m, re = /Current\s*week\s*\(\s*([^)]+?)\s*\)/gi; (m = re.exec(text)); ) {
+  // per-model weekly windows, e.g. "Current week (Fable)" — keyed by name
+  const models = new Map<string, UsageSection>()
+  for (const m of clean.matchAll(/Current\s*week\s*\(\s*([^)]+?)\s*\)/gi)) {
     if (/all\s*models/i.test(m[1])) continue
-    const used = /(\d{1,3})\s*%\s*used/i.exec(text.slice(m.index + m[0].length, m.index + m[0].length + 500))
-    if (used) models.set(m[1].replace(/\s+/g, ' '), parseInt(used[1], 10))
+    const name = m[1].replace(/\s+/g, ' ').replace(/\s*only$/i, '') // "(Sonnet only)" → "Sonnet"
+    const into = models.get(name) ?? { percent: null, resetsAt: null }
+    models.set(name, into)
+    readSection(clean, m.index + m[0].length, into)
   }
-  const weeklyModels = [...models].map(([name, percent]) => ({ name, percent }))
   return {
     fiveHour: session.percent,
     weekly: weekly.percent,
     resetsAt: session.resetsAt,
     weeklyResetsAt: weekly.resetsAt,
-    weeklyModels,
+    weeklyModels: [...models]
+      .filter(([, v]) => v.percent !== null)
+      .map(([name, v]) => ({ name, percent: v.percent!, resetsAt: v.resetsAt })),
+    limitedUntil: null,
     updatedAt: Date.now()
   }
 }
@@ -326,17 +363,37 @@ export async function fetchUsage(configDir: string, retry = 1): Promise<AccountU
   return fetchUsage(configDir, retry - 1)
 }
 
+/** First-run screens the probe can safely advance through with Enter: the
+ *  folder-trust prompt and one-time pickers (e.g. the theme picker a profile
+ *  shows again after some CLI updates) that sit between spawn and the input
+ *  box. Probe-only — in a real session the user answers these themselves. */
+function isAdvancePrompt(text: string): boolean {
+  return isTrustPrompt(text) || /Choose\s*the\s*text\s*style|Press\s*Enter\s*to\s*continue/i.test(text)
+}
+
 async function probeUsage(configDir: string): Promise<AccountUsage | null> {
   const [bin, env] = await Promise.all([claudePath(), envFor(configDir)])
-  const proc = pty.spawn(bin, [], { name: 'xterm-256color', cols: 120, rows: 40, cwd: homedir(), env })
+  const proc = pty.spawn(bin, [], { name: 'xterm-256color', cols: 120, rows: 40, cwd: scratchCwd(), env })
   let buf = ''
-  let trusted = false
+  let advances = 0
   let sent = false
-  let settling = false
+  let lastParse = ''
   return new Promise((resolve) => {
+    let done = false
     const finish = (usage: AccountUsage | null): void => {
+      if (done) return // our own kill() below re-enters via onExit
+      done = true
       clearInterval(poll)
       clearTimeout(deadline)
+      const debugDir = process.env['AGENTS_USAGE_DEBUG_DIR']
+      if (debugDir) {
+        try {
+          mkdirSync(debugDir, { recursive: true })
+          writeFileSync(join(debugDir, `usage-${basename(configDir)}-${Date.now()}.txt`), buf)
+        } catch {
+          /* debug only */
+        }
+      }
       try {
         proc.kill()
       } catch {
@@ -351,14 +408,8 @@ async function probeUsage(configDir: string): Promise<AccountUsage | null> {
     })
     proc.onExit(() => finish(null))
     const poll = setInterval(() => {
-      const text = stripAnsi(buf)
-      if (!trusted && isTrustPrompt(text)) {
-        trusted = true
-        buf = ''
-        proc.write('\r')
-        return
-      }
       if (!sent) {
+        const text = stripAnsi(buf)
         if (/\?\s*for\s*shortcuts|Try\s*"/i.test(text)) {
           sent = true
           buf = ''
@@ -370,13 +421,21 @@ async function probeUsage(configDir: string): Promise<AccountUsage | null> {
               /* probe already ended */
             }
           }, 250)
+        } else if (advances < 5 && isAdvancePrompt(text)) {
+          advances++ // once per screen: clearing buf re-arms for the next one
+          buf = ''
+          proc.write('\r')
         }
         return
       }
-      if (!settling && parseUsagePanel(buf)) {
-        settling = true // panel is up — give it one more beat to finish rendering
-        setTimeout(() => finish(parseUsagePanel(buf)), 1_200)
-      }
+      // settle: the panel keeps (re)painting while its data loads — finish only
+      // once the parsed values hold still across two polls, so a per-model
+      // section that renders a beat after session/weekly isn't cut off
+      const usage = parseUsagePanel(buf)
+      if (!usage) return
+      const key = JSON.stringify([usage.fiveHour, usage.weekly, usage.resetsAt, usage.weeklyResetsAt, usage.weeklyModels])
+      if (key === lastParse) finish(usage)
+      else lastParse = key
     }, 400)
   })
 }

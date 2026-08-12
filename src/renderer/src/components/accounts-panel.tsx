@@ -103,7 +103,7 @@ export function AccountsPanel() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // refresh usage when this panel opens (may prompt once for Keychain access)
+  // kick a fresh usage probe for every account when this panel opens
   useEffect(() => void window.api.refreshAllUsage(), [])
 
   const run = async (fn: () => Promise<void>): Promise<void> => {

@@ -9,19 +9,22 @@ export type LoginStatus = 'unknown' | 'logged_out' | 'logged_in' | 'expired'
 
 /**
  * Percent scale 0-100, matching both sources: statusline
- * `rate_limits.*.used_percentage` and the oauth/usage endpoint's `utilization`.
+ * `rate_limits.*.used_percentage` and claude's own /usage panel.
  */
 export interface AccountUsage {
   /** % used of the current (5-hour) window */
   fiveHour: number | null
   /** % used of the weekly (all-models) window */
   weekly: number | null
-  /** epoch ms when the 5-hour window resets (endpoint gives ISO — convert) */
+  /** epoch ms when the 5-hour window resets */
   resetsAt: number | null
   /** epoch ms when the weekly window resets */
   weeklyResetsAt: number | null
-  /** per-model weekly usage (e.g. Fable), from the usage endpoint only */
-  weeklyModels: { name: string; percent: number }[]
+  /** per-model weekly windows (e.g. Fable), from the /usage panel probe only */
+  weeklyModels: { name: string; percent: number; resetsAt: number | null }[]
+  /** claude showed a "limit hit" banner: treat the account as exhausted until
+   *  this time (cleared by the next probe or successful statusline update) */
+  limitedUntil: number | null
   /** epoch ms of last successful refresh */
   updatedAt: number | null
 }

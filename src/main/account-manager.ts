@@ -5,7 +5,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path'
 import type { Account, AccountUsage } from '../shared/types'
 import type { NewAccountInput } from '../shared/ipc'
 import type { AppStore } from './store'
-import { authStatus, claudeLogout, claudePath, envFor, extractLoginUrl, fetchUsage } from './claude-cli'
+import { authStatus, claudeLogout, claudePath, envFor, extractLoginUrl, fetchUsage, scratchCwd } from './claude-cli'
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -24,6 +24,10 @@ function displayName(configDir: string): string {
   }
 }
 
+function emptyUsage(): AccountUsage {
+  return { fiveHour: null, weekly: null, resetsAt: null, weeklyResetsAt: null, weeklyModels: [], limitedUntil: null, updatedAt: null }
+}
+
 export class AccountManager {
   constructor(
     private store: AppStore,
@@ -31,11 +35,15 @@ export class AccountManager {
   ) {}
 
   list(): Account[] {
-    // tolerate accounts persisted before `note` / `weeklyModels` existed
+    // tolerate accounts persisted before newer fields existed
     return (this.store.get('accounts') ?? []).map((a) => ({
       ...a,
       note: a.note ?? '',
-      usage: { ...a.usage, weeklyModels: a.usage?.weeklyModels ?? [] }
+      usage: {
+        ...a.usage,
+        weeklyModels: (a.usage?.weeklyModels ?? []).map((m) => ({ ...m, resetsAt: m.resetsAt ?? null })),
+        limitedUntil: a.usage?.limitedUntil ?? null
+      }
     }))
   }
 
@@ -65,7 +73,7 @@ export class AccountManager {
       subscriptionType: null,
       loginStatus: 'unknown',
       authCheckedAt: null,
-      usage: { fiveHour: null, weekly: null, resetsAt: null, weeklyResetsAt: null, weeklyModels: [], updatedAt: null }
+      usage: emptyUsage()
     }
     this.store.set('accounts', [...this.list(), account])
     this.onChange()
@@ -101,7 +109,7 @@ export class AccountManager {
         subscriptionType: null,
         loginStatus: 'unknown',
         authCheckedAt: null,
-        usage: { fiveHour: null, weekly: null, resetsAt: null, weeklyResetsAt: null, weeklyModels: [], updatedAt: null }
+        usage: emptyUsage()
       }
       this.store.set('accounts', [...this.list(), account])
     }
@@ -129,10 +137,19 @@ export class AccountManager {
     }
   }
 
+  /** config dirs with a /usage probe already in flight — panel-open, the
+   *  periodic refresh and limit detection can overlap; one probe is enough */
+  private probing = new Set<string>()
+
   async refreshUsage(configDir: string): Promise<void> {
-    if (process.env['AGENTS_NO_USAGE_FETCH']) return
-    const usage = await fetchUsage(configDir) // best-effort (scrapes claude /usage)
-    if (usage) this.update(configDir, { usage })
+    if (process.env['AGENTS_NO_USAGE_FETCH'] || this.probing.has(configDir)) return
+    this.probing.add(configDir)
+    try {
+      const usage = await fetchUsage(configDir) // best-effort (scrapes claude /usage)
+      if (usage) this.update(configDir, { usage }) // full replace — also clears limitedUntil
+    } finally {
+      this.probing.delete(configDir)
+    }
   }
 
   /** Startup: auth for everyone concurrently (fast, no usage probes). */
@@ -151,24 +168,58 @@ export class AccountManager {
     )
   }
 
-  /** Called by SessionManager when a statusline event carries rate_limits. */
+  /** Called by SessionManager when a statusline event carries rate_limits.
+   *  Statusline data only arrives on a successful API round-trip, so any
+   *  banner-marked exhaustion is over. */
   updateUsage(configDir: string, usage: Partial<AccountUsage>): void {
     const account = this.get(configDir)
     if (!account) return
-    this.update(configDir, { usage: { ...account.usage, ...usage, updatedAt: Date.now() } })
+    this.update(configDir, { usage: { ...account.usage, ...usage, limitedUntil: null, updatedAt: Date.now() } })
+  }
+
+  /** A session on this account just saw claude's "limit hit" banner. Remember
+   *  the exhaustion until the known 5h reset (or briefly, when unknown) so
+   *  pickWithHeadroom can't bounce straight back to it on stale numbers, and
+   *  probe the real state in the background. */
+  markRateLimited(configDir: string): void {
+    const account = this.get(configDir)
+    if (!account) return
+    const { resetsAt } = account.usage
+    const limitedUntil = resetsAt && resetsAt > Date.now() ? resetsAt : Date.now() + 30 * 60_000
+    this.update(configDir, { usage: { ...account.usage, limitedUntil } })
+    void this.refreshUsage(configDir)
   }
 
   /**
-   * Pick a logged-in account (optionally excluding one) with the most 5-hour
-   * headroom. Unknown usage counts as fully available (0%). Returns null when
-   * no candidate is logged in. Used both for auto-switch and for auto-selecting
-   * an account when a new session leaves it blank.
+   * Utilization of an account's tightest limit window (0-100). Any full window
+   * blocks the whole account: 5-hour, weekly, or a per-model weekly cap. A
+   * window whose reset time has passed counts as free again (stale data), and a
+   * banner-marked exhaustion (limitedUntil) counts as full.
+   */
+  worstUsedPct(a: Account): number {
+    const now = Date.now()
+    const eff = (pct: number | null, resetsAt: number | null): number =>
+      pct == null || (resetsAt != null && resetsAt <= now) ? 0 : pct
+    const u = a.usage
+    return Math.max(
+      u.limitedUntil != null && u.limitedUntil > now ? 100 : 0,
+      eff(u.fiveHour, u.resetsAt),
+      eff(u.weekly, u.weeklyResetsAt),
+      // a per-model window without its own reset time follows the weekly one
+      ...u.weeklyModels.map((m) => eff(m.percent, m.resetsAt ?? u.weeklyResetsAt))
+    )
+  }
+
+  /**
+   * Pick a logged-in account (optionally excluding one) with the most headroom
+   * across every limit window. Unknown usage counts as fully available (0%).
+   * Returns null when no candidate is logged in. Used both for auto-switch and
+   * for auto-selecting an account when a new session leaves it blank.
    */
   pickWithHeadroom(exclude?: string): Account | null {
-    const usedPct = (a: Account): number => a.usage.fiveHour ?? 0
     const candidates = this.list()
-      .filter((a) => a.configDir !== exclude && a.loginStatus === 'logged_in' && usedPct(a) < 100)
-      .sort((a, b) => usedPct(a) - usedPct(b))
+      .filter((a) => a.configDir !== exclude && a.loginStatus === 'logged_in' && this.worstUsedPct(a) < 100)
+      .sort((a, b) => this.worstUsedPct(a) - this.worstUsedPct(b))
     return candidates[0] ?? null
   }
 
@@ -224,7 +275,7 @@ export class AccountManager {
     // the pty that receives the pasted code have DIFFERENT OAuth states → "invalid code".
     this.cancelLogin(configDir)
     env['PATH'] = `${this.noBrowserPath()}:${env['PATH'] ?? ''}`
-    const proc = pty.spawn(bin, ['auth', 'login'], { name: 'xterm-256color', cols: 100, rows: 30, cwd: homedir(), env })
+    const proc = pty.spawn(bin, ['auth', 'login'], { name: 'xterm-256color', cols: 100, rows: 30, cwd: scratchCwd(), env })
     this.logins.set(configDir, proc)
     let buf = ''
     let settled = false
