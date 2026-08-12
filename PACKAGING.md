@@ -58,7 +58,10 @@ export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
 pnpm package        # 自動載入 .env → 簽名 + 公證 + 打 DMG/zip（arm64 + x64）
 ```
 
-輸出在 `release/`：`Agent S-0.1.0-arm64.dmg`、`Agent S-0.1.0.dmg`（x64）、對應 zip。
+輸出在 `release/`：`agents-<版本>-<arch>.dmg` 與對應 zip。`pnpm package` 只建**當前架構**；
+要出雙架構（x64 + arm64，含各自重建的 node-pty）走 `pnpm release --full` 或 GitHub Actions 的
+Release workflow——arch 由腳本逐一驅動，別在 electron-builder.yml 裡寫死 arch 清單
+（那會讓每次呼叫都建全部 arch，把交叉編譯好的 node-pty 蓋掉）。
 公證要上傳到 Apple 伺服器，通常 **數分鐘**，屬正常。
 
 - 想先只驗簽名、不跑公證（快，免網路，不需 `.env`）：`pnpm package:signonly`
@@ -95,3 +98,25 @@ xcrun stapler validate release/Agent\ S-0.1.0-arm64.dmg
   常見原因：某個執行檔沒 hardened runtime、或沒簽到（本設定已對 app 全簽 + 開 hardened runtime）。
 - **node-pty**：`pty.node` 與 `spawn-helper` 靠 `asarUnpack` 留在 asar 外、由 builder 一起簽；`entitlements` 的 `disable-library-validation` 讓它在 hardened runtime 下能載入。若換過 Node/Electron 版本，先 `pnpm rebuild`（postinstall 會自動跑 electron-rebuild）。
 - **只是自用、不想公證**：`pnpm package:signonly`（簽名版本，本機可跑；傳到別台仍會被 Gatekeeper 擋，需右鍵開啟）。
+
+---
+
+## 發佈更新（GitHub Releases + in-app 更新器）
+
+App 內建更新器（`src/main/update-manager.ts`）：啟動 15 秒後與每 4 小時檢查一次，tray 也有「檢查更新」。資料來源是 repo 最新 release 的 `latest.json`（`releases/latest/download/latest.json`，repo 為 public 免 token）。
+
+**兩種發佈**：
+- **熱更（hot）**：只換 `app.asar`（所有 JS + 依賴，跨架構同一包）。使用者按「更新並重啟」即完成，不重裝。
+- **完整（--full）**：native 有變（**Electron 或 node-pty 版本更動**）時必須用，附 DMG/zip；更新器偵測到 `runtime` 指紋不符時會引導使用者下載重裝。
+
+```bash
+pnpm release --dry-run            # 只建置與產 manifest，看看會上傳什麼
+pnpm release --notes "修了 X"      # 熱更發佈
+pnpm release --full --notes "…"   # 換過 Electron / node-pty、或第一次發佈
+```
+
+腳本的防呆：版本沒 bump 會擋、native 變了沒帶 `--full` 會擋、第一次發佈必須 `--full`。上傳用 `gh release create`（未登入會印出手動指令）。熱更 release 的 manifest 會沿用上一版的 `full.url`，讓「前往下載」永遠有效。
+
+驗證與測試：`AGENTS_UPDATE_MANIFEST_URL` 可指向本地 manifest；`AGENTS_UPDATE_AUTO=1` 無對話框自動套用（e2e 用，結束碼 0=套用/最新、2=失敗、3=native 不符）；`AGENTS_USER_DATA_DIR` 隔離測試資料。
+
+注意：熱更會就地改寫 `.app` 內的 `app.asar`——目前是 ad-hoc 簽名（憑證撤銷中）沒有影響；日後恢復簽名＋公證後也不影響已安裝使用者（macOS 只在首次下載時做 Gatekeeper 深度驗證），但**重新分發**時一定要用 `pnpm release --full` 產生的完整簽名包。

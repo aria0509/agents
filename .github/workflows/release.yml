@@ -1,0 +1,53 @@
+# Release from CI: builds the hot package (app.asar.gz + latest.json) and, for
+# full releases, the DMG/zip installers — then publishes a GitHub release via
+# scripts/release.mjs. Version comes from package.json (the script refuses to
+# re-publish an existing version, and refuses hot-only when the native runtime
+# — Electron / node-pty — changed).
+#
+# Run it from the Actions tab ("Run workflow"): tick "full" when Electron or
+# node-pty changed, or for the very first release.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Full release (DMG/zip installers; required for the first release and whenever Electron/node-pty changed)'
+        type: boolean
+        default: false
+      notes:
+        description: 'Release notes (defaults to v<version>)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write # create the release + tag
+
+jobs:
+  release:
+    runs-on: macos-15 # arm64; x64 artifacts are cross-built (see release.mjs)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4 # version comes from package.json packageManager
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Cache Electron downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: electron-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # postinstall runs electron-rebuild for node-pty (host arch)
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build & publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release.mjs ${{ inputs.full && '--full' || '' }} --notes "${{ inputs.notes }}"

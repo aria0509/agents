@@ -1,5 +1,7 @@
 appId: com.agents.claudecode
 productName: Agent S
+# no spaces: release-asset download URLs must stay predictable (update manifest)
+artifactName: ${name}-${version}-${arch}.${ext}
 directories:
   buildResources: build
   output: release
@@ -14,15 +16,13 @@ asarUnpack:
 mac:
   icon: assets/icon.png
   category: public.app-category.developer-tools
+  # arch intentionally NOT pinned here: scripts/release.mjs drives one arch at a
+  # time (--x64 / --arm64) with node-pty rebuilt per arch first — a fixed list
+  # here would make every invocation build BOTH arches and overwrite the
+  # correctly-cross-built one. Plain `pnpm package` builds the host arch.
   target:
-    - target: dmg
-      arch:
-        - arm64
-        - x64
-    - target: zip
-      arch:
-        - arm64
-        - x64
+    - dmg
+    - zip
   # Pin to the Developer ID Application cert (substring match). Explicit so it
   # never silently falls back to the "Apple Development" cert, which can't be
   # notarized. Create the cert first (see PACKAGING.md).

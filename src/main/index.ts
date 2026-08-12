@@ -16,11 +16,15 @@ import {
 import { createStore } from './store'
 import { AccountManager } from './account-manager'
 import { SessionManager, type NotifyKind } from './session-manager'
+import { UpdateManager } from './update-manager'
 import { WindowManager } from './window-manager'
 
 // Persist under the user's home dir (~/.agent-s); a separate dev copy so a dev
-// run never touches real data.
-app.setPath('userData', join(homedir(), app.isPackaged ? '.agent-s' : '.agent-s-dev'))
+// run never touches real data. Env override for tests (isolated store + lock).
+app.setPath(
+  'userData',
+  process.env['AGENTS_USER_DATA_DIR'] ?? join(homedir(), app.isPackaged ? '.agent-s' : '.agent-s-dev')
+)
 
 const NOTIFY_TEXT: Record<string, Record<NotifyKind, string>> = {
   'zh-Hant': { attention: '需要處理', done: '任務完成', 'rate-limited': '已達限額' },
@@ -29,7 +33,16 @@ const NOTIFY_TEXT: Record<string, Record<NotifyKind, string>> = {
 }
 const QUIT_TEXT: Record<
   string,
-  { message: string; detail: string; bg: string; quit: string; cancel: string; tray: string; settings: string }
+  {
+    message: string
+    detail: string
+    bg: string
+    quit: string
+    cancel: string
+    tray: string
+    settings: string
+    checkUpdate: string
+  }
 > = {
   'zh-Hant': {
     message: '要讓 Claude 在背景繼續執行嗎？',
@@ -38,7 +51,8 @@ const QUIT_TEXT: Record<
     quit: '結束',
     cancel: '取消',
     tray: '打開主視窗',
-    settings: '設定…'
+    settings: '設定…',
+    checkUpdate: '檢查更新'
   },
   'zh-Hans': {
     message: '要让 Claude 在后台继续运行吗？',
@@ -47,7 +61,8 @@ const QUIT_TEXT: Record<
     quit: '退出',
     cancel: '取消',
     tray: '打开主窗口',
-    settings: '设置…'
+    settings: '设置…',
+    checkUpdate: '检查更新'
   },
   en: {
     message: 'Keep Claude running in the background?',
@@ -56,7 +71,8 @@ const QUIT_TEXT: Record<
     quit: 'Quit',
     cancel: 'Cancel',
     tray: 'Open main window',
-    settings: 'Settings…'
+    settings: 'Settings…',
+    checkUpdate: 'Check for updates'
   }
 }
 const RESTORE_TEXT: Record<string, { message: string; detail: string; yes: string; no: string }> = {
@@ -146,13 +162,21 @@ function bootstrap(): void {
   // if any were still active last time, offer to resume those once the window has loaded
   const activeCount = sessions.restoreAsExited()
 
-  // refresh auth for every account — non-blocking (usage is probed separately by
-  // scraping each account's own /usage panel; see fetchUsage in claude-cli)
-  void accounts.refreshAllAuth()
+  // refresh auth for every account (fast), then probe usage in the background
+  // and keep it fresh — auto-switch decisions must not run on day-old numbers.
+  // Each probe scrapes that account's own /usage panel (fetchUsage, ~15s).
+  void accounts.refreshAllAuth().then(() => accounts.refreshAllUsage())
+  setInterval(() => void accounts.refreshAllUsage(), 30 * 60_000)
 
   // app/dock icon (packaging uses assets/icon.png too; this covers dev)
   const appIcon = nativeImage.createFromPath(iconPath())
   if (!appIcon.isEmpty()) app.dock?.setIcon(appIcon)
+
+  // set before the quit dialog would show: update-restarts must quit silently
+  let quitting = false
+  const updates = new UpdateManager(() => {
+    quitting = true
+  })
 
   // menu-bar presence so the app can be reopened after all windows close
   const trayImg = appIcon.isEmpty() ? appIcon : appIcon.resize({ width: 18, height: 18 })
@@ -162,6 +186,7 @@ function bootstrap(): void {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: locale(QUIT_TEXT).tray, click: () => windows.focusMain() },
+      { label: locale(QUIT_TEXT).checkUpdate, click: () => void updates.check(true) },
       { type: 'separator' },
       { role: 'quit' }
     ])
@@ -245,7 +270,6 @@ function bootstrap(): void {
   handle('focusPoppedOut', (id: string) => windows.focusPoppedOut(id))
 
   // Quit flow: offer to keep running in the background when sessions are alive.
-  let quitting = false
   const shutdownAll = (): void => {
     sessions.shutdown()
     accounts.shutdown()
@@ -278,6 +302,7 @@ function bootstrap(): void {
   })
 
   const mainWin = windows.createMain()
+  updates.schedule()
   if (activeCount > 0) {
     mainWin.webContents.once('did-finish-load', () => {
       const t = locale(RESTORE_TEXT)
