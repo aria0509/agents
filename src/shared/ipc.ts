@@ -9,6 +9,11 @@ export interface SessionConfigPatch {
   title?: string
   limitRule?: LimitRule
   launchArgs?: string
+  /** null = CLI default; changes apply on the next (re)spawn — updateConfig
+   *  restarts a non-running session right away to make them stick */
+  modelId?: string | null
+  effort?: string | null
+  mode?: string | null
 }
 
 /** account fields the user can register/edit */

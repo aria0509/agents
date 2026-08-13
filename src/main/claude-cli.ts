@@ -228,6 +228,34 @@ export function isTrustPrompt(text: string): boolean {
 }
 
 /**
+ * Whether the TUI has rendered its interactive input box (the footer hints
+ * appear only once input is accepted). Until then, a pasted submission lands in
+ * the input buffer but the trailing Enter gets eaten — e.g. while `--resume` is
+ * still replaying a transcript after an account switch (seen live).
+ */
+export function isTuiReady(text: string): boolean {
+  return /\?\s*for\s*shortcuts|Try\s*"/i.test(stripAnsi(text))
+}
+
+/**
+ * Current permission mode from TUI output, or null when the buffer carries no
+ * signal. The statusline payload does NOT include it (verified 2.1.228), but
+ * the input-box footer always names the active mode ("⏸ manual mode on",
+ * "⏵⏵ accept edits on", "plan mode on", …) and repaints constantly — so the
+ * LAST occurrence in the buffer is the current mode. Values match the CLI's
+ * --permission-mode choices.
+ */
+export function detectPermissionMode(text: string): string | null {
+  const s = stripAnsi(text)
+  let mode: string | null = null
+  for (const m of s.matchAll(/\b(accept\s*edits|bypass\s*permissions)\s*on\b|\b(manual|auto|dontAsk|plan)\s*mode\s*on\b/gi)) {
+    if (m[1]) mode = /accept/i.test(m[1]) ? 'acceptEdits' : 'bypassPermissions'
+    else mode = /dontask/i.test(m[2]) ? 'dontAsk' : m[2].toLowerCase()
+  }
+  return mode
+}
+
+/**
  * Whether ultracode is active, from TUI output — true/false, or null when the
  * buffer carries no signal. The statusline can't tell (it reports ultracode as
  * plain xhigh, verified 2.1.212), so state comes from the TUI itself:
@@ -368,7 +396,7 @@ export async function fetchUsage(configDir: string, retry = 1): Promise<AccountU
  *  shows again after some CLI updates) that sit between spawn and the input
  *  box. Probe-only — in a real session the user answers these themselves. */
 function isAdvancePrompt(text: string): boolean {
-  return isTrustPrompt(text) || /Choose\s*the\s*text\s*style|Press\s*Enter\s*to\s*continue/i.test(text)
+  return isTrustPrompt(text) || /Choose\s*the\s*text\s*style|Press\s*Enter\s*to\s*continue/i.test(stripAnsi(text))
 }
 
 async function probeUsage(configDir: string): Promise<AccountUsage | null> {
@@ -409,8 +437,7 @@ async function probeUsage(configDir: string): Promise<AccountUsage | null> {
     proc.onExit(() => finish(null))
     const poll = setInterval(() => {
       if (!sent) {
-        const text = stripAnsi(buf)
-        if (/\?\s*for\s*shortcuts|Try\s*"/i.test(text)) {
+        if (isTuiReady(buf)) {
           sent = true
           buf = ''
           proc.write('/usage')
@@ -421,7 +448,7 @@ async function probeUsage(configDir: string): Promise<AccountUsage | null> {
               /* probe already ended */
             }
           }, 250)
-        } else if (advances < 5 && isAdvancePrompt(text)) {
+        } else if (advances < 5 && isAdvancePrompt(buf)) {
           advances++ // once per screen: clearing buf re-arms for the next one
           buf = ''
           proc.write('\r')
@@ -440,18 +467,25 @@ async function probeUsage(configDir: string): Promise<AccountUsage | null> {
   })
 }
 
-/** CLI args for launching a session's claude process. */
+/** CLI args for launching a session's claude process. model/effort/mode are all
+ *  per-process in the CLI — every respawn (stop→resume, account switch, limit
+ *  restart) must carry them back or the session silently reverts to defaults
+ *  (live-hit: /effort max degraded to xhigh after a switch). Flags, not slash
+ *  commands: `/model` pops a "re-read history?" confirm dialog on resumes. */
 export function sessionArgs(opts: {
   settingsFile: string
   launchArgs: string
   resumeSessionId?: string | null
   model?: string | null
+  effort?: string | null
+  permissionMode?: string | null
 }): string[] {
   const args = ['--settings', opts.settingsFile]
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId)
-  // restore the session's model at launch (per-session, no persisted default) —
-  // a `/model` slash command would instead pop a "re-read history?" confirm dialog
   if (opts.model) args.push('--model', opts.model)
+  // the flag only accepts plain levels — ultracode is re-applied via /effort
+  if (opts.effort && opts.effort !== 'ultracode') args.push('--effort', opts.effort)
+  if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode)
   const extra = opts.launchArgs.trim()
   if (extra) args.push(...extra.split(/\s+/))
   return args

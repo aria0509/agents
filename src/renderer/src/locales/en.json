@@ -15,7 +15,8 @@
   "sessions": {
     "empty": "No sessions yet",
     "emptyHint": "Create a session to start managing Claude Code",
-    "new": "New Session"
+    "new": "New Session",
+    "groupAll": "All"
   },
   "session": {
     "cwd": "Working directory",
@@ -44,6 +45,19 @@
       "done": "Done",
       "rate-limited": "Rate limited",
       "exited": "Exited"
+    },
+    "model": "Model",
+    "effort": "Effort",
+    "mode": "Mode",
+    "optionDefault": "Default",
+    "modelEffortHint": "Model/effort/mode follow in-CLI changes automatically and are restored on every restart. Saving applies to a non-running session immediately (brief restart).",
+    "modes": {
+      "manual": "Manual",
+      "auto": "Auto",
+      "acceptEdits": "Accept edits",
+      "plan": "Plan",
+      "dontAsk": "Don't ask",
+      "bypassPermissions": "Bypass permissions"
     }
   },
   "limitRule": {

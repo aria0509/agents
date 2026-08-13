@@ -36,6 +36,11 @@ interface Entry {
 
 export class PtyManager extends EventEmitter {
   private entries = new Map<string, Entry>()
+  /** cumulative stream offset per session, carried ACROSS respawns — followers
+   *  (mounted terminals) dedupe by `end`, so a respawn (account switch, restart)
+   *  must continue the offset; resetting to 0 would make every already-mounted
+   *  terminal silently discard the new process's output */
+  private lastEnd = new Map<string, number>()
 
   spawn(
     id: string,
@@ -52,7 +57,7 @@ export class PtyManager extends EventEmitter {
       cwd: opts.cwd,
       env: opts.env
     })
-    const entry: Entry = { proc, chunks: [], buffered: 0, end: 0, cols, rows, pending: '' }
+    const entry: Entry = { proc, chunks: [], buffered: 0, end: this.lastEnd.get(id) ?? 0, cols, rows, pending: '' }
     this.entries.set(id, entry)
 
     proc.onData((data) => {
@@ -60,6 +65,7 @@ export class PtyManager extends EventEmitter {
       entry.chunks.push(data)
       entry.buffered += data.length
       entry.end += data.length
+      this.lastEnd.set(id, entry.end)
       while (entry.buffered > BUFFER_CAP && entry.chunks.length > 1) {
         entry.buffered -= entry.chunks.shift()!.length
       }
@@ -122,7 +128,9 @@ export class PtyManager extends EventEmitter {
 
   snapshot(id: string): PtySnapshot {
     const e = this.entries.get(id)
-    if (!e) return { data: '', end: 0 }
+    // dead sessions report the final offset so a terminal mounted now keeps
+    // following seamlessly when the session respawns (offsets are monotonic)
+    if (!e) return { data: '', end: this.lastEnd.get(id) ?? 0 }
     // flush first so emitted chunk boundaries never straddle a snapshot —
     // followers dedupe purely by comparing `end` offsets
     this.flush(id, e)
@@ -131,6 +139,11 @@ export class PtyManager extends EventEmitter {
 
   kill(id: string): void {
     this.entries.get(id)?.proc.kill()
+  }
+
+  /** Session removed for good — drop its stream offset too. */
+  forget(id: string): void {
+    this.lastEnd.delete(id)
   }
 
   /** Kill and resolve once the process has actually exited (before moving its files). */

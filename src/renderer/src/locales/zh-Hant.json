@@ -15,7 +15,8 @@
   "sessions": {
     "empty": "尚無 Session",
     "emptyHint": "建立 Session 開始管理 Claude Code",
-    "new": "新增 Session"
+    "new": "新增 Session",
+    "groupAll": "全部"
   },
   "session": {
     "cwd": "工作目錄",
@@ -44,6 +45,19 @@
       "done": "任務完成",
       "rate-limited": "已達限額",
       "exited": "已結束"
+    },
+    "model": "模型",
+    "effort": "Effort",
+    "mode": "模式",
+    "optionDefault": "預設",
+    "modelEffortHint": "模型／effort／模式會自動跟隨 CLI 內的變更，並在每次重啟時還原。儲存後，非執行中的 session 會立即重啟生效。",
+    "modes": {
+      "manual": "手動確認",
+      "auto": "自動",
+      "acceptEdits": "自動接受編輯",
+      "plan": "計劃模式",
+      "dontAsk": "不詢問",
+      "bypassPermissions": "跳過權限"
     }
   },
   "limitRule": {

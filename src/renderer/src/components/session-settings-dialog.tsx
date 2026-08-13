@@ -11,8 +11,20 @@ import { LaunchArgsInput } from '@/components/launch-args-input'
 import { useApp, accountOptionLabel } from '@/stores/app'
 
 const LIMIT_RULES: LimitRule[] = ['auto-switch', 'manual', 'wait-and-continue']
+/** display-name → model id; "default" keeps whatever the CLI decides */
+const MODELS = [
+  ['Fable 5', 'claude-fable-5'],
+  ['Opus 5', 'claude-opus-5'],
+  ['Sonnet 5', 'claude-sonnet-5'],
+  ['Haiku 4.5', 'claude-haiku-4-5']
+] as const
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const
+const MODES = ['manual', 'auto', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'] as const
+const DEFAULT = '__default__' // Select can't take '' as an item value
 
-/** Edit a session's title, account (only while idle), limit rule, launch args; delete lives here too. */
+/** Edit a session's title, account (only while idle), model/effort/mode, limit
+ *  rule, launch args; delete lives here too. Values also follow in-CLI changes
+ *  (statusline / footer sync), so the dialog always shows the live state. */
 export function SessionSettingsDialog({ sessionId, onClose }: { sessionId: string | null; onClose: () => void }) {
   const { t } = useTranslation()
   const accounts = useApp((s) => s.accounts)
@@ -22,6 +34,9 @@ export function SessionSettingsDialog({ sessionId, onClose }: { sessionId: strin
   const [accountDir, setAccountDir] = useState('')
   const [limitRule, setLimitRule] = useState<LimitRule>('auto-switch')
   const [launchArgs, setLaunchArgs] = useState('')
+  const [modelId, setModelId] = useState(DEFAULT)
+  const [effort, setEffort] = useState(DEFAULT)
+  const [mode, setMode] = useState(DEFAULT)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -30,15 +45,28 @@ export function SessionSettingsDialog({ sessionId, onClose }: { sessionId: strin
     setAccountDir(session.accountDir)
     setLimitRule(session.limitRule)
     setLaunchArgs(session.launchArgs.join(' '))
+    setModelId(session.modelId ?? DEFAULT)
+    setEffort(session.effort ?? DEFAULT)
+    setMode(session.mode ?? DEFAULT)
     setError('')
-  }, [session])
+    // sync from the store only when the dialog switches session — not on every
+    // state push, or live statusline updates would clobber in-progress edits
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
 
   if (!session) return null
   const running = session.state === 'running'
 
   const save = async (): Promise<void> => {
     try {
-      await window.api.updateSessionConfig(session.id, { title, limitRule, launchArgs })
+      await window.api.updateSessionConfig(session.id, {
+        title,
+        limitRule,
+        launchArgs,
+        modelId: modelId === DEFAULT ? null : modelId,
+        effort: effort === DEFAULT ? null : effort,
+        mode: mode === DEFAULT ? null : mode
+      })
       if (accountDir !== session.accountDir) await window.api.switchAccount(session.id, accountDir)
       onClose()
     } catch (e) {
@@ -75,6 +103,57 @@ export function SessionSettingsDialog({ sessionId, onClose }: { sessionId: strin
               </SelectContent>
             </Select>
           </div>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="grid gap-2">
+              <Label>{t('session.model')}</Label>
+              <Select value={modelId} onValueChange={setModelId}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT}>{t('session.optionDefault')}</SelectItem>
+                  {MODELS.map(([name, id]) => (
+                    <SelectItem key={id} value={id}>
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label>{t('session.effort')}</Label>
+              <Select value={effort} onValueChange={setEffort}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT}>{t('session.optionDefault')}</SelectItem>
+                  {EFFORTS.map((e) => (
+                    <SelectItem key={e} value={e}>
+                      {e}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label>{t('session.mode')}</Label>
+              <Select value={mode} onValueChange={setMode}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT}>{t('session.optionDefault')}</SelectItem>
+                  {MODES.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {t(`session.modes.${m}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <p className="text-muted-foreground -mt-2 text-xs">{t('session.modelEffortHint')}</p>
           <div className="grid gap-2">
             <Label>{t('session.limitRule')}</Label>
             <Select value={limitRule} onValueChange={(v) => setLimitRule(v as LimitRule)}>

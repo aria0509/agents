@@ -185,6 +185,8 @@ function bootstrap(): void {
   // clicking the icon shows this menu; only "open main window" opens the window
   tray.setContextMenu(
     Menu.buildFromTemplate([
+      { label: `Agent S ${app.getVersion()}`, enabled: false },
+      { type: 'separator' },
       { label: locale(QUIT_TEXT).tray, click: () => windows.focusMain() },
       { label: locale(QUIT_TEXT).checkUpdate, click: () => void updates.check(true) },
       { type: 'separator' },
@@ -192,7 +194,7 @@ function bootstrap(): void {
     ])
   )
 
-  // minimal app menu: Settings (⌘,) + Edit (so copy/paste works in inputs) + Quit
+  // app menu: version + main window + updates + Settings (⌘,) + Edit (copy/paste) + Quit
   const openSettings = (): void => {
     windows.focusMain()
     windows.sendToMain(EVENT_OPEN_SETTINGS, undefined)
@@ -202,6 +204,11 @@ function bootstrap(): void {
       {
         label: 'Agent S',
         submenu: [
+          { label: `Agent S ${app.getVersion()}`, enabled: false },
+          { type: 'separator' },
+          { label: locale(QUIT_TEXT).tray, click: () => windows.focusMain() },
+          { label: locale(QUIT_TEXT).checkUpdate, click: () => void updates.check(true) },
+          { type: 'separator' },
           { label: locale(QUIT_TEXT).settings, accelerator: 'CmdOrCtrl+,', click: openSettings },
           { type: 'separator' },
           { role: 'quit' }

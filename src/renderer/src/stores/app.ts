@@ -20,6 +20,9 @@ interface AppStore extends AppState {
   /** the card a file is currently being dragged over (drop-zone highlight), or null */
   dragOverId: string | null
   setDragOverId: (id: string | null) => void
+  /** sidebar filter: show only sessions with this cwd (null = all) */
+  groupFilter: string | null
+  setGroupFilter: (cwd: string | null) => void
 }
 
 export const useApp = create<AppStore>((set) => ({
@@ -38,7 +41,9 @@ export const useApp = create<AppStore>((set) => ({
   setDraft: (id, text) => set((s) => ({ drafts: { ...s.drafts, [id]: text } })),
   appendDraft: (id, text) => set((s) => ({ drafts: { ...s.drafts, [id]: (s.drafts[id] ?? '') + text } })),
   dragOverId: null,
-  setDragOverId: (id) => set((s) => (s.dragOverId === id ? s : { dragOverId: id }))
+  setDragOverId: (id) => set((s) => (s.dragOverId === id ? s : { dragOverId: id })),
+  groupFilter: null,
+  setGroupFilter: (cwd) => set({ groupFilter: cwd })
 }))
 
 // hydrate once and follow main-process state pushes

@@ -4,6 +4,7 @@ import { Plus, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useApp, sortedSessions } from '@/stores/app'
 import { SessionGrid } from '@/components/session-grid'
+import { SessionSidebar } from '@/components/session-sidebar'
 import { NewSessionDialog } from '@/components/new-session-dialog'
 import { SettingsDialog } from '@/components/settings-dialog'
 
@@ -11,6 +12,8 @@ function App() {
   const { t } = useTranslation()
   const sessions = useApp((s) => s.sessions)
   const setFocused = useApp((s) => s.setFocused)
+  const groupFilter = useApp((s) => s.groupFilter)
+  const setGroupFilter = useApp((s) => s.setGroupFilter)
   const [newOpen, setNewOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
@@ -22,6 +25,13 @@ function App() {
       unsettings()
     }
   }, [setFocused])
+
+  // a filtered group whose last session was removed falls back to "all"
+  useEffect(() => {
+    if (groupFilter && !sessions.some((s) => s.cwd === groupFilter)) setGroupFilter(null)
+  }, [sessions, groupFilter, setGroupFilter])
+
+  const visible = groupFilter ? sessions.filter((s) => s.cwd === groupFilter) : sessions
 
   return (
     <div className="flex h-screen flex-col">
@@ -37,19 +47,22 @@ function App() {
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-y-auto p-4" onClick={() => setFocused(null)}>
-        {sessions.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3">
-            <p className="text-lg font-medium">{t('sessions.empty')}</p>
-            <p className="text-muted-foreground text-sm">{t('sessions.emptyHint')}</p>
-            <Button className="mt-2" onClick={() => setNewOpen(true)}>
-              <Plus /> {t('sessions.new')}
-            </Button>
-          </div>
-        ) : (
-          <SessionGrid sessions={sortedSessions(sessions)} />
-        )}
-      </main>
+      <div className="flex min-h-0 flex-1">
+        {sessions.length > 0 && <SessionSidebar sessions={sessions} />}
+        <main className="min-h-0 flex-1 overflow-y-auto p-4" onClick={() => setFocused(null)}>
+          {sessions.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3">
+              <p className="text-lg font-medium">{t('sessions.empty')}</p>
+              <p className="text-muted-foreground text-sm">{t('sessions.emptyHint')}</p>
+              <Button className="mt-2" onClick={() => setNewOpen(true)}>
+                <Plus /> {t('sessions.new')}
+              </Button>
+            </div>
+          ) : (
+            <SessionGrid sessions={sortedSessions(visible)} />
+          )}
+        </main>
+      </div>
 
       <NewSessionDialog open={newOpen} onClose={() => setNewOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />

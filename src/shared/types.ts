@@ -86,8 +86,11 @@ export interface Session {
   /** last known values reported by the injected statusline */
   model: string | null
   effort: string | null
-  /** model id (e.g. claude-fable-5) — used to restore the model on resume */
+  /** model id (e.g. claude-fable-5) — restored via --model on every respawn */
   modelId: string | null
+  /** permission mode (manual/auto/acceptEdits/plan/dontAsk/bypassPermissions),
+   *  synced from the TUI footer; restored via --permission-mode on respawn */
+  mode: string | null
 }
 
 export type Theme = 'light' | 'dark' | 'system'

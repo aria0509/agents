@@ -11,10 +11,12 @@ import { PtyManager } from './pty-manager'
 import { HookServer, type HookEvent } from './hook-server'
 import {
   claudePath,
+  detectPermissionMode,
   detectRateLimit,
   detectUltracode,
   envFor,
   isTrustPrompt,
+  isTuiReady,
   moveTranscript,
   sessionArgs,
   writeSessionSettings
@@ -53,12 +55,16 @@ export class SessionManager extends EventEmitter {
   /** sessions to put back into ultracode once their (re)started claude is ready —
    *  the CLI flag is session-only and never survives a new process */
   private pendingUltracode = new Set<string>()
-  /** earliest time the next auto-submit may fire, per session — staggers the
-   *  restore submits (ultracode/continue) so their bracketed pastes never merge */
-  private nextAutoSubmitAt = new Map<string, number>()
-  /** pending auto-submit timers per session, so a kill/respawn inside the
-   *  stagger window can cancel them — else they'd paste into the NEXT process */
-  private autoSubmitTimers = new Map<string, Set<NodeJS.Timeout>>()
+  /** sessions whose TUI has rendered its input box since the last spawn — the
+   *  gate for delivering queued submissions (see send()) */
+  private tuiReady = new Set<string>()
+  /** submissions queued per session until the TUI is ready; drained FIFO with
+   *  an ack step between items */
+  private sendQueue = new Map<string, string[]>()
+  /** sessions with a submission currently awaiting its ack */
+  private sending = new Set<string>()
+  /** per-session ack-verify timers, cancelled on kill/respawn */
+  private verifyTimers = new Map<string, NodeJS.Timeout>()
   /** wait-and-continue timers, keyed by session id */
   private resetTimers = new Map<string, NodeJS.Timeout>()
   /** true during shutdown so pty exits don't rewrite state to 'exited' — we keep
@@ -148,7 +154,8 @@ export class SessionManager extends EventEmitter {
       poppedOut: false,
       model: null,
       effort: null,
-      modelId: null
+      modelId: null,
+      mode: null
     }
     this.store.set('sessions', [...this.list(), session])
     await this.spawn(session, { resume: false })
@@ -170,7 +177,7 @@ export class SessionManager extends EventEmitter {
    */
   stop(id: string): void {
     this.clearResetTimer(id)
-    this.clearAutoSubmit(id)
+    this.clearSends(id)
     this.pendingContinue.delete(id)
     this.pendingUltracode.delete(id)
     // a stop during a --resume boot must read as a stop, not a failed resume
@@ -204,8 +211,9 @@ export class SessionManager extends EventEmitter {
     this.resuming.delete(id)
     this.pendingContinue.delete(id)
     this.pendingUltracode.delete(id)
-    this.clearAutoSubmit(id)
+    this.clearSends(id)
     this.ptys.kill(id)
+    this.ptys.forget(id)
     this.store.set(
       'sessions',
       this.list().filter((s) => s.id !== id)
@@ -213,7 +221,9 @@ export class SessionManager extends EventEmitter {
     this.onChange()
   }
 
-  updateConfig(id: string, patch: SessionConfigPatch): void {
+  async updateConfig(id: string, patch: SessionConfigPatch): Promise<void> {
+    const session = this.get(id)
+    if (!session) return
     const p: Partial<Session> = {}
     if (patch.title !== undefined) p.title = patch.title.trim() || null
     if (patch.limitRule) p.limitRule = patch.limitRule
@@ -221,7 +231,29 @@ export class SessionManager extends EventEmitter {
       pushRecentLaunchArgs(this.store, patch.launchArgs)
       p.launchArgs = patch.launchArgs.trim() ? patch.launchArgs.trim().split(/\s+/) : []
     }
+    if (patch.modelId !== undefined) p.modelId = patch.modelId
+    if (patch.effort !== undefined) p.effort = patch.effort
+    if (patch.mode !== undefined) p.mode = patch.mode
+    // model/effort/mode are launch flags — respawn a live (idle) session so the
+    // change applies now; a running one keeps its turn and picks them up on the
+    // next restart. Kill BEFORE writing the new values: the dying process's
+    // last output frames still run the footer/statusline sync, which would
+    // overwrite the user's choice with the old mode (live-hit in e2e).
+    const respawn =
+      (['modelId', 'effort', 'mode'] as const).some((k) => patch[k] !== undefined && patch[k] !== session[k]) &&
+      this.ptys.isAlive(id) &&
+      session.state !== 'running'
+    if (respawn) {
+      await this.ptys.killAndWait(id)
+      this.tail.delete(id)
+    }
     this.update(id, p)
+    if (respawn) {
+      if (this.get(id)?.claudeSessionId) this.resuming.add(id)
+      const fresh = this.get(id)
+      if (fresh) await this.spawn(fresh, { resume: !!fresh.claudeSessionId })
+      this.update(id, { state: 'idle' })
+    }
   }
 
   reorder(orderedIds: string[]): void {
@@ -262,7 +294,9 @@ export class SessionManager extends EventEmitter {
       claudeSessionId: canResume ? session.claudeSessionId : null,
       state: 'idle'
     })
-    if (opts.continueAfter) this.pendingContinue.add(id)
+    // a session stopped by its usage limit resumes work by default after any
+    // switch — including a manual one from the account picker
+    if (opts.continueAfter ?? session.state === 'rate-limited') this.pendingContinue.add(id)
     if (canResume) this.resuming.add(id) // fall back to fresh if the resume still fails
     await this.spawn(this.get(id)!, { resume: canResume })
   }
@@ -275,11 +309,13 @@ export class SessionManager extends EventEmitter {
     this.ptys.write(id, data)
   }
 
-  /** Submit a chat message, proactively switching first if the rule calls for it. */
+  /** Submit a chat message, proactively switching first if the rule calls for it.
+   *  Goes through the send queue: instant when claude is up, held until the TUI
+   *  is ready when a switch just respawned it. */
   async submit(id: string, text: string): Promise<void> {
     await this.maybeSwitchBeforeSubmit(id)
     this.clearFinished(id)
-    this.ptys.submit(id, text)
+    this.send(id, text)
   }
 
   shutdown(): void {
@@ -297,7 +333,7 @@ export class SessionManager extends EventEmitter {
     // Remember the intent and re-apply once the new process is ready; the label
     // must still reset now so a failed re-apply can't leave it lying.
     this.tail.delete(session.id)
-    this.clearAutoSubmit(session.id) // cancel any restore submits from a prior incarnation
+    this.clearSends(session.id) // queued submits from a prior incarnation must not fire into this one
     if (session.effort === 'ultracode') {
       this.pendingUltracode.add(session.id)
       this.update(session.id, { effort: null })
@@ -308,8 +344,10 @@ export class SessionManager extends EventEmitter {
       settingsFile,
       launchArgs: session.launchArgs.join(' '),
       resumeSessionId: opts.resume ? session.claudeSessionId : null,
-      // resume on the same model; a fresh (non-resume) session keeps CLI default
-      model: opts.resume ? session.modelId : null
+      model: session.modelId,
+      // ultracode was just converted to pendingUltracode above — pass the base level
+      effort: session.effort === 'ultracode' ? null : session.effort,
+      permissionMode: session.mode
     })
     const env = await envFor(session.accountDir)
     // Pinned input box + captured wheel scrolling (claude's alt-screen TUI) is
@@ -357,6 +395,11 @@ export class SessionManager extends EventEmitter {
       this.trusted.add(id)
       setTimeout(() => this.ptys.write(id, '\r'), 500)
     }
+    // input box is up — queued submissions may now actually land
+    if (!this.tuiReady.has(id) && isTuiReady(buf)) {
+      this.tuiReady.add(id)
+      this.drain(id)
+    }
     // ultracode only — the statusline syncs every plain level itself
     const uc = detectUltracode(buf)
     if (uc === true && session.effort !== 'ultracode') {
@@ -364,6 +407,10 @@ export class SessionManager extends EventEmitter {
     } else if (uc === false && session.effort === 'ultracode') {
       this.update(id, { effort: null }) // next statusline fills the real level
     }
+    // permission mode changed in the TUI (shift+tab) — sync it so the next
+    // respawn restores it (the statusline payload doesn't carry it)
+    const mode = detectPermissionMode(buf)
+    if (mode && mode !== session.mode) this.update(id, { mode })
     if (session.state !== 'rate-limited' && detectRateLimit(buf)) void this.handleRateLimit(id)
   }
 
@@ -429,8 +476,8 @@ export class SessionManager extends EventEmitter {
           transcriptPath: (payload['transcript_path'] as string) ?? session.transcriptPath
         })
         // restore ultracode before any queued "continue" runs a turn on it
-        if (this.pendingUltracode.delete(sessionId)) this.autoSubmit(sessionId, '/effort ultracode')
-        if (this.pendingContinue.delete(sessionId)) this.autoSubmit(sessionId, 'continue')
+        if (this.pendingUltracode.delete(sessionId)) this.send(sessionId, '/effort ultracode')
+        if (this.pendingContinue.delete(sessionId)) this.send(sessionId, 'continue')
         break
       case 'UserPromptSubmit':
         this.setState(sessionId, 'running')
@@ -458,6 +505,9 @@ export class SessionManager extends EventEmitter {
   }
 
   private onStatusline(session: Session, p: StatuslinePayload): void {
+    // a killed process's in-flight statusline POST can land after a respawn
+    // began — it must not overwrite freshly-configured model/effort values
+    if (!this.ptys.isAlive(session.id)) return
     const model = p.model?.display_name ?? session.model
     const modelId = p.model?.id ?? session.modelId
     // ultracode reports as plain xhigh here (scanOutput sets/clears the label)
@@ -482,28 +532,54 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Submit a restore command (ultracode/continue) to a freshly (re)started
-   * claude: waits 1.5s for the TUI to accept input, and spaces consecutive
-   * submits ≥1.5s apart — bracketed pastes sent closer together merge into one
-   * garbled input line. Timers are tracked so a kill/respawn inside the window
-   * cancels them (clearAutoSubmit) rather than pasting into the next process.
+   * Queue a submission (user text, "continue", "/effort ultracode") and deliver
+   * it once the TUI can actually take it. Two failure modes this absorbs, both
+   * seen live around account switches:
+   * - a paste into a claude still replaying a resumed transcript lands in the
+   *   input box but the trailing Enter gets eaten → gate on isTuiReady;
+   * - even then a submission can silently not register → after sending, expect
+   *   claude's UserPromptSubmit ack (state → running) and re-press Enter a few
+   *   times if it never comes (the text already sits in the input box). Local
+   *   slash commands never ack, so the timeout advances the queue either way.
    */
-  private autoSubmit(id: string, text: string): void {
-    const at = Math.max(Date.now() + 1500, this.nextAutoSubmitAt.get(id) ?? 0)
-    this.nextAutoSubmitAt.set(id, at + 1500)
-    const timers = this.autoSubmitTimers.get(id) ?? new Set()
-    this.autoSubmitTimers.set(id, timers)
-    const timer = setTimeout(() => {
-      timers.delete(timer)
-      this.ptys.submit(id, text)
-    }, at - Date.now())
-    timers.add(timer)
+  private send(id: string, text: string): void {
+    const q = this.sendQueue.get(id) ?? []
+    q.push(text)
+    this.sendQueue.set(id, q)
+    this.drain(id)
   }
 
-  private clearAutoSubmit(id: string): void {
-    for (const t of this.autoSubmitTimers.get(id) ?? []) clearTimeout(t)
-    this.autoSubmitTimers.delete(id)
-    this.nextAutoSubmitAt.delete(id)
+  private drain(id: string): void {
+    if (this.sending.has(id) || !this.tuiReady.has(id)) return
+    const text = this.sendQueue.get(id)?.shift()
+    if (text === undefined) return
+    this.sending.add(id)
+    this.ptys.submit(id, text)
+    let retries = 0
+    const timer = setInterval(() => {
+      const state = this.get(id)?.state
+      const acked = state === 'running' || state === 'done' || state === 'needs-attention'
+      if (acked || !this.ptys.isAlive(id) || retries >= 3) {
+        clearInterval(timer)
+        this.verifyTimers.delete(id)
+        this.sending.delete(id)
+        if (this.ptys.isAlive(id)) this.drain(id)
+        return
+      }
+      retries++
+      this.ptys.write(id, '\r') // the text already sits in the input box
+    }, 2000)
+    this.verifyTimers.set(id, timer)
+  }
+
+  /** Drop queued/in-flight submissions — they must never reach the NEXT process. */
+  private clearSends(id: string): void {
+    const t = this.verifyTimers.get(id)
+    if (t) clearInterval(t)
+    this.verifyTimers.delete(id)
+    this.sendQueue.delete(id)
+    this.sending.delete(id)
+    this.tuiReady.delete(id)
   }
 
   /** typing into a finished session brings it back to plain idle */
