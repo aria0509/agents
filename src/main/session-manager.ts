@@ -27,11 +27,18 @@ const SWITCH_THRESHOLD = 95
 
 /** SGR + legacy mouse reports and focus in/out — terminal chatter, not typing */
 const MOUSE_OR_FOCUS = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[[IO]/g
+/** xterm's automatic replies to claude's queries — cursor position (CPR), device
+ *  attributes (DA1/DA2), status (DSR), mode reports (DECRPM), DCS and OSC
+ *  responses. These flow through the same renderer onData→write path as typing;
+ *  treating them as keystrokes abandoned queued sends and cleared done badges
+ *  (live-hit: the interrupted-resume screen queries constantly, so every queued
+ *  submission got dropped before delivery). */
+const TERMINAL_REPLIES = /\x1b\[\d+;\d+R|\x1b\[[?>][\d;]*c|\x1b\[\d*n|\x1b\[\?\d+;\d+\$y|\x1bP[^\x1b]*\x1b\\|\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g
 
-/** True if a pty write carries real keyboard input (anything once mouse/focus
- *  reports are removed) rather than being pure mouse/focus chatter. */
+/** True if a pty write carries real keyboard input rather than mouse/focus
+ *  chatter or the terminal answering claude's state queries. */
 function isKeyboardInput(data: string): boolean {
-  return data.replace(MOUSE_OR_FOCUS, '').length > 0
+  return data.replace(MOUSE_OR_FOCUS, '').replace(TERMINAL_REPLIES, '').length > 0
 }
 
 interface StatuslinePayload {

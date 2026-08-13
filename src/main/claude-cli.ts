@@ -228,13 +228,16 @@ export function isTrustPrompt(text: string): boolean {
 }
 
 /**
- * Whether the TUI has rendered its interactive input box (the footer hints
- * appear only once input is accepted). Until then, a pasted submission lands in
- * the input buffer but the trailing Enter gets eaten — e.g. while `--resume` is
- * still replaying a transcript after an account switch (seen live).
+ * Whether the TUI has rendered its interactive input box. Until then, a pasted
+ * submission lands in the input buffer but the trailing Enter gets eaten —
+ * e.g. while `--resume` is still replaying a transcript (seen live). Signals,
+ * any of which suffices (footers vary by state — the interrupted-resume screen
+ * shows "bypass permissions on (shift+tab to cycle)" with NO "? for shortcuts"):
+ * the shortcut hints, the mode footer, or our own injected statusline marker
+ * ("◉ agents · <account>", from hook-server's statuslineText — keep in sync).
  */
 export function isTuiReady(text: string): boolean {
-  return /\?\s*for\s*shortcuts|Try\s*"/i.test(stripAnsi(text))
+  return /\?\s*for\s*shortcuts|Try\s*"|shift\+tab\s*to\s*cycle|◉\s*agents/i.test(stripAnsi(text))
 }
 
 /**
