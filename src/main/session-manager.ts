@@ -65,6 +65,8 @@ export class SessionManager extends EventEmitter {
   private sending = new Set<string>()
   /** per-session ack-verify timers, cancelled on kill/respawn */
   private verifyTimers = new Map<string, NodeJS.Timeout>()
+  /** per-spawn fallback that force-opens the ready gate if the footer never matches */
+  private readyFallbacks = new Map<string, NodeJS.Timeout>()
   /** wait-and-continue timers, keyed by session id */
   private resetTimers = new Map<string, NodeJS.Timeout>()
   /** true during shutdown so pty exits don't rewrite state to 'exited' — we keep
@@ -155,7 +157,8 @@ export class SessionManager extends EventEmitter {
       model: null,
       effort: null,
       modelId: null,
-      mode: null
+      mode: null,
+      draft: null
     }
     this.store.set('sessions', [...this.list(), session])
     await this.spawn(session, { resume: false })
@@ -305,8 +308,24 @@ export class SessionManager extends EventEmitter {
     // clicking/scrolling a mouse-tracking terminal (claude's pinned mode) writes
     // mouse/focus reports — those aren't the user re-engaging, so they must not
     // clear a done/needs-attention badge just because the user glanced at the card
-    if (isKeyboardInput(data)) this.clearFinished(id)
+    if (isKeyboardInput(data)) {
+      this.clearFinished(id)
+      // the user is typing in the terminal — abandon queued auto-submits and any
+      // pending Enter retry, or a retry would fire their half-typed line (live-hit
+      // on the interrupted-resume "What should Claude do instead?" prompt)
+      this.abandonSends(id)
+    }
     this.ptys.write(id, data)
+  }
+
+  /** Persist the chat-input draft. Deliberately no notify(): this runs per
+   *  keystroke (debounced) and renderers own their live copy — the value only
+   *  matters for hydration after an app restart. */
+  saveDraft(id: string, text: string): void {
+    this.store.set(
+      'sessions',
+      this.list().map((s) => (s.id === id ? { ...s, draft: text || null } : s))
+    )
   }
 
   /** Submit a chat message, proactively switching first if the rule calls for it.
@@ -550,16 +569,37 @@ export class SessionManager extends EventEmitter {
   }
 
   private drain(id: string): void {
-    if (this.sending.has(id) || !this.tuiReady.has(id)) return
+    if (this.sending.has(id)) return
+    if (!this.tuiReady.has(id)) {
+      // the footer regex is wording-sensitive — if it never matches (e.g. the
+      // interrupted-resume prompt, or a future CLI change), queued text must not
+      // be stuck forever: force-open the gate after a generous boot window
+      if (!this.readyFallbacks.has(id) && this.ptys.isAlive(id) && this.sendQueue.get(id)?.length) {
+        this.readyFallbacks.set(
+          id,
+          setTimeout(() => {
+            this.readyFallbacks.delete(id)
+            if (this.ptys.isAlive(id) && !this.tuiReady.has(id)) {
+              this.tuiReady.add(id)
+              this.drain(id)
+            }
+          }, 15_000)
+        )
+      }
+      return
+    }
     const text = this.sendQueue.get(id)?.shift()
     if (text === undefined) return
     this.sending.add(id)
     this.ptys.submit(id, text)
+    // local slash commands never ack via UserPromptSubmit — don't re-press Enter
+    // for them (a retry can only collide with whatever the user types next)
+    const maxRetries = text.startsWith('/') ? 0 : 3
     let retries = 0
     const timer = setInterval(() => {
       const state = this.get(id)?.state
       const acked = state === 'running' || state === 'done' || state === 'needs-attention'
-      if (acked || !this.ptys.isAlive(id) || retries >= 3) {
+      if (acked || !this.ptys.isAlive(id) || retries >= maxRetries) {
         clearInterval(timer)
         this.verifyTimers.delete(id)
         this.sending.delete(id)
@@ -572,13 +612,21 @@ export class SessionManager extends EventEmitter {
     this.verifyTimers.set(id, timer)
   }
 
-  /** Drop queued/in-flight submissions — they must never reach the NEXT process. */
-  private clearSends(id: string): void {
+  /** Drop queued/in-flight submissions (user took over, or nothing should land). */
+  private abandonSends(id: string): void {
     const t = this.verifyTimers.get(id)
     if (t) clearInterval(t)
     this.verifyTimers.delete(id)
     this.sendQueue.delete(id)
     this.sending.delete(id)
+  }
+
+  /** Full reset on kill/respawn — leftovers must never reach the NEXT process. */
+  private clearSends(id: string): void {
+    this.abandonSends(id)
+    const f = this.readyFallbacks.get(id)
+    if (f) clearTimeout(f)
+    this.readyFallbacks.delete(id)
     this.tuiReady.delete(id)
   }
 

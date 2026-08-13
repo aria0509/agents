@@ -261,6 +261,7 @@ function bootstrap(): void {
   handle('switchAccount', (id: string, dir: string) => sessions.switchAccount(id, dir))
   handle('updateSessionConfig', (id: string, patch: SessionConfigPatch) => sessions.updateConfig(id, patch))
   handle('reorderSessions', (ids: string[]) => sessions.reorder(ids))
+  handle('saveDraft', (id: string, text: string) => sessions.saveDraft(id, text))
   handle('savePastedImage', (bytes: Uint8Array, ext: string) => {
     const dir = join(app.getPath('userData'), 'paste-images')
     mkdirSync(dir, { recursive: true })

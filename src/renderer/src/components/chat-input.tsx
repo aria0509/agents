@@ -15,6 +15,7 @@ export function ChatInput({ sessionId, autoFocus }: { sessionId: string; autoFoc
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const draft = useApp((s) => s.drafts[sessionId] ?? '')
   const setDraft = useApp((s) => s.setDraft)
+  const persistTimer = useRef<number | undefined>(undefined)
 
   // focus on activate, after xterm has mounted (which would otherwise grab focus)
   useEffect(() => {
@@ -23,10 +24,18 @@ export function ChatInput({ sessionId, autoFocus }: { sessionId: string; autoFoc
     return () => clearTimeout(id)
   }, [autoFocus])
 
+  // persist the draft (debounced) so an app quit/restart can't eat typed text
+  const persist = (text: string): void => {
+    clearTimeout(persistTimer.current)
+    persistTimer.current = window.setTimeout(() => void window.api.saveDraft(sessionId, text), 400)
+  }
+
   const send = (): void => {
     if (!draft.trim()) return
     void window.api.ptySubmit(sessionId, draft)
     setDraft(sessionId, '')
+    clearTimeout(persistTimer.current)
+    void window.api.saveDraft(sessionId, '')
   }
 
   return (
@@ -35,7 +44,10 @@ export function ChatInput({ sessionId, autoFocus }: { sessionId: string; autoFoc
         ref={inputRef}
         autoFocus={autoFocus}
         value={draft}
-        onChange={(e) => setDraft(sessionId, e.target.value)}
+        onChange={(e) => {
+          setDraft(sessionId, e.target.value)
+          persist(e.target.value)
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey && !e.metaKey) {
             e.preventDefault()

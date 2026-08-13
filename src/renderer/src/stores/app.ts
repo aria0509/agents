@@ -46,8 +46,14 @@ export const useApp = create<AppStore>((set) => ({
   setGroupFilter: (cwd) => set({ groupFilter: cwd })
 }))
 
-// hydrate once and follow main-process state pushes
-void window.api.getState().then((s) => useApp.setState(s))
+// hydrate once (including persisted drafts — typed text survives app restarts)
+// and follow main-process state pushes (which never touch the local drafts map)
+void window.api.getState().then((s) =>
+  useApp.setState({
+    ...s,
+    drafts: Object.fromEntries(s.sessions.filter((x) => x.draft).map((x) => [x.id, x.draft!]))
+  })
+)
 window.api.onStateChanged((s) => useApp.setState(s))
 
 export const accountName = (accounts: Account[], dir: string): string =>

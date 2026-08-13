@@ -95,6 +95,8 @@ export interface IpcApi {
   switchAccount(id: string, targetAccountDir: string): Promise<void>
   updateSessionConfig(id: string, patch: SessionConfigPatch): Promise<void>
   reorderSessions(orderedIds: string[]): Promise<void>
+  /** persist the chat-input draft (debounced) so it survives an app restart */
+  saveDraft(id: string, text: string): Promise<void>
   /** save an image blob to a temp file, return its path (for chat paste) */
   savePastedImage(bytes: Uint8Array, ext: string): Promise<string>
   ptyWrite(id: string, data: string): Promise<void>
@@ -143,6 +145,7 @@ export const INVOKE_CHANNELS = [
   'switchAccount',
   'updateSessionConfig',
   'reorderSessions',
+  'saveDraft',
   'savePastedImage',
   'ptyWrite',
   'ptySubmit',

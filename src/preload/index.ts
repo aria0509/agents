@@ -119,6 +119,7 @@ const api: IpcApi = {
   switchAccount: (id, dir) => invoke('switchAccount', id, dir),
   updateSessionConfig: (id, patch) => invoke('updateSessionConfig', id, patch),
   reorderSessions: (ids) => invoke('reorderSessions', ids),
+  saveDraft: (id, text) => invoke('saveDraft', id, text),
   savePastedImage: (bytes, ext) => invoke('savePastedImage', bytes, ext),
   ptyWrite: (id, data) => invoke('ptyWrite', id, data),
   ptySubmit: (id, text) => invoke('ptySubmit', id, text),

@@ -91,6 +91,8 @@ export interface Session {
   /** permission mode (manual/auto/acceptEdits/plan/dontAsk/bypassPermissions),
    *  synced from the TUI footer; restored via --permission-mode on respawn */
   mode: string | null
+  /** unsent chat-input draft, persisted so an app restart can't eat typed text */
+  draft: string | null
 }
 
 export type Theme = 'light' | 'dark' | 'system'
