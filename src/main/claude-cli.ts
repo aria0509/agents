@@ -5,7 +5,19 @@
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { writeFileSync, mkdirSync, copyFileSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import {
+  writeFileSync,
+  mkdirSync,
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  lstatSync,
+  symlinkSync
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import pty from 'node-pty'
@@ -88,6 +100,48 @@ export async function envFor(configDir: string): Promise<Record<string, string>>
   return env
 }
 
+/**
+ * One session registry shared by every account — see linkSessionRegistry().
+ * Deliberately outside userData: the symlinks live in the user's real account
+ * dirs, so dev and packaged builds must agree on a single target.
+ */
+const SHARED_SESSION_REGISTRY = join(homedir(), '.agent-s-sessions')
+
+/**
+ * Make peer messaging (ListAgents / SendMessage) work ACROSS accounts.
+ *
+ * Claude finds peer sessions by listing `<configDir>/sessions/<pid>.json` and
+ * authenticates with the `peerToken` in the sibling
+ * `<pid>.<sha256(socketPath)>.key` — both scoped to CLAUDE_CONFIG_DIR. That
+ * scoping is the ONLY thing separating accounts: the sockets themselves sit in
+ * a machine-wide /tmp/cc-socks and the wire protocol carries no account
+ * identity (verified against 2.1.245). Point every account at one registry and
+ * sessions see each other regardless of which account runs them.
+ *
+ * Best-effort: peer messaging is a bonus, never a reason to fail a spawn.
+ */
+export function linkSessionRegistry(configDir: string): void {
+  const link = join(configDir, 'sessions')
+  try {
+    mkdirSync(SHARED_SESSION_REGISTRY, { recursive: true, mode: 0o700 })
+    const current = lstatSync(link, { throwIfNoEntry: false })
+    if (current?.isSymbolicLink()) {
+      if (resolve(configDir, readlinkSync(link)) === SHARED_SESSION_REGISTRY) return
+      rmSync(link)
+    } else if (current) {
+      // adopt what is already there — records of live sessions included, they
+      // keep writing to the same path and simply follow the link from now on
+      for (const entry of readdirSync(link)) {
+        renameSync(join(link, entry), join(SHARED_SESSION_REGISTRY, entry))
+      }
+      rmSync(link, { recursive: true })
+    }
+    symlinkSync(SHARED_SESSION_REGISTRY, link)
+  } catch (err) {
+    console.warn(`[registry] shared session registry unavailable for ${configDir}:`, err)
+  }
+}
+
 let cachedScratchCwd: string | null = null
 /**
  * An empty directory to run `claude` in when we only need to TALK to it (usage
@@ -153,7 +207,12 @@ export function writeSessionSettings(
     `curl -sS -m 3 -X POST --data-binary @- http://127.0.0.1:${hookPort}/e/${sessionId}/${event}`
   const hook = (event: string) => [{ hooks: [{ type: 'command', command: post(event) }] }]
   const settings = {
-    // user overrides first (e.g. {"includeCoAuthoredBy": false}) — our
+    // Peer messages between our own sessions are intra-app traffic: deliver
+    // them instead of holding them for approval (the CLI holds whenever the
+    // two sessions' permission-mode classes differ). Before the overrides —
+    // this one is the user's to turn back off.
+    crossSessionInbound: 'accept',
+    // user overrides next (e.g. {"includeCoAuthoredBy": false}) — our
     // statusLine/hooks always win, session tracking depends on them
     ...overrides,
     statusLine: { type: 'command', command: post('statusline') },

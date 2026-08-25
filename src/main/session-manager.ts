@@ -18,6 +18,7 @@ import {
   isBypassWarning,
   isTrustPrompt,
   isTuiReady,
+  linkSessionRegistry,
   moveTranscript,
   parseSettingsOverrides,
   readSystemPrompt,
@@ -402,6 +403,9 @@ export class SessionManager extends EventEmitter {
       addDirs: session.addDirs ?? [],
       appendSystemPrompt: readSystemPrompt(session.systemPromptFiles ?? [])
     })
+    // peer discovery is scoped to CLAUDE_CONFIG_DIR — share one registry so
+    // sessions can message each other across accounts, not just within one
+    linkSessionRegistry(session.accountDir)
     const env = await envFor(session.accountDir)
     // Pinned input box + captured wheel scrolling (claude's alt-screen TUI) is
     // env/settings/statsig-gated, not terminal-detected — force it on so every
