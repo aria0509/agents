@@ -130,6 +130,7 @@ export class SessionManager extends EventEmitter {
         // them once here so every later read/compare can trust the shape
         systemPromptFiles: s.systemPromptFiles ?? [],
         addDirs: s.addDirs ?? [],
+        addDirClaudeMd: s.addDirClaudeMd ?? false,
         settingsJson: s.settingsJson ?? '',
         poppedOut: false,
         state: 'exited' as const,
@@ -174,6 +175,7 @@ export class SessionManager extends EventEmitter {
       mode: input.mode,
       systemPromptFiles: input.systemPromptFiles,
       addDirs: input.addDirs,
+      addDirClaudeMd: input.addDirClaudeMd,
       settingsJson: input.settingsJson,
       draft: null
     }
@@ -256,13 +258,14 @@ export class SessionManager extends EventEmitter {
     if (patch.mode !== undefined) p.mode = patch.mode
     if (patch.systemPromptFiles !== undefined) p.systemPromptFiles = patch.systemPromptFiles
     if (patch.addDirs !== undefined) p.addDirs = patch.addDirs
+    if (patch.addDirClaudeMd !== undefined) p.addDirClaudeMd = patch.addDirClaudeMd
     if (patch.settingsJson !== undefined) p.settingsJson = patch.settingsJson
     // these are all launch flags — respawn a live (idle) session so the
     // change applies now; a running one keeps its turn and picks them up on the
     // next restart. Kill BEFORE writing the new values: the dying process's
     // last output frames still run the footer/statusline sync, which would
     // overwrite the user's choice with the old mode (live-hit in e2e).
-    const launchKeys = ['modelId', 'effort', 'mode', 'systemPromptFiles', 'addDirs', 'settingsJson'] as const
+    const launchKeys = ['modelId', 'effort', 'mode', 'systemPromptFiles', 'addDirs', 'addDirClaudeMd', 'settingsJson'] as const
     const respawn =
       launchKeys.some((k) => patch[k] !== undefined && JSON.stringify(patch[k]) !== JSON.stringify(session[k])) &&
       this.ptys.isAlive(id) &&
@@ -407,6 +410,7 @@ export class SessionManager extends EventEmitter {
     // Hard-off auto IDE connect too: a stored autoConnectIde setting (from the
     // user's real IDE usage) would otherwise trigger the same failed install.
     env['CLAUDE_CODE_AUTO_CONNECT_IDE'] = 'false'
+    if (session.addDirClaudeMd) env['CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD'] = '1'
     this.ptys.spawn(session.id, await claudePath(), args, { cwd: session.cwd, env })
   }
 

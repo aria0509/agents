@@ -16,6 +16,7 @@ export interface SessionConfigPatch {
   mode?: string | null
   systemPromptFiles?: string[]
   addDirs?: string[]
+  addDirClaudeMd?: boolean
   settingsJson?: string
 }
 
@@ -56,6 +57,7 @@ export interface NewSessionInput {
   mode: string | null
   systemPromptFiles: string[]
   addDirs: string[]
+  addDirClaudeMd: boolean
   settingsJson: string
 }
 

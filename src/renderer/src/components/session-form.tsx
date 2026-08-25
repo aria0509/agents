@@ -42,6 +42,7 @@ export interface SessionFormValues {
   launchArgs: string
   systemPromptFiles: string
   addDirs: string
+  addDirClaudeMd: boolean
   settingsJson: string
 }
 
@@ -56,6 +57,7 @@ export const emptySessionForm: SessionFormValues = {
   launchArgs: '',
   systemPromptFiles: '',
   addDirs: '',
+  addDirClaudeMd: false,
   settingsJson: ''
 }
 
@@ -70,6 +72,7 @@ export const sessionFormValues = (s: Session): SessionFormValues => ({
   launchArgs: s.launchArgs.join(' '),
   systemPromptFiles: (s.systemPromptFiles ?? []).join('\n'),
   addDirs: (s.addDirs ?? []).join('\n'),
+  addDirClaudeMd: s.addDirClaudeMd ?? false,
   settingsJson: s.settingsJson ?? ''
 })
 
@@ -271,10 +274,10 @@ export function SessionForm({
         <div className="flex gap-2">
           <Textarea
             id="f-prompt-files"
-            rows={2}
+            rows={1}
+            className="min-h-9"
             value={values.systemPromptFiles}
             onChange={(e) => onChange({ systemPromptFiles: e.target.value })}
-            placeholder={'~/work/contexts/CLAUDE.md'}
           />
           <Button
             variant="outline"
@@ -292,10 +295,10 @@ export function SessionForm({
         <div className="flex gap-2">
           <Textarea
             id="f-add-dirs"
-            rows={2}
+            rows={1}
+            className="min-h-9"
             value={values.addDirs}
             onChange={(e) => onChange({ addDirs: e.target.value })}
-            placeholder={'~/work/contexts'}
           />
           <Button
             variant="outline"
@@ -306,6 +309,15 @@ export function SessionForm({
             <FolderPlus />
           </Button>
         </div>
+        <label className="text-muted-foreground flex w-fit cursor-pointer items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            className="accent-primary"
+            checked={values.addDirClaudeMd}
+            onChange={(e) => onChange({ addDirClaudeMd: e.target.checked })}
+          />
+          {t('session.addDirsClaudeMd')}
+        </label>
         <p className="text-muted-foreground text-xs">{t('session.addDirsHint')}</p>
       </div>
       <div className="grid gap-2">

@@ -96,6 +96,9 @@ export interface Session {
   systemPromptFiles: string[]
   /** extra directories claude may access (--add-dir) */
   addDirs: string[]
+  /** also load those directories' CLAUDE.md
+   *  (env CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1) */
+  addDirClaudeMd: boolean
   /** JSON object text merged into the generated --settings file ('' = none) */
   settingsJson: string
   /** unsent chat-input draft, persisted so an app restart can't eat typed text */

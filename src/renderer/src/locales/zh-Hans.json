@@ -31,6 +31,7 @@
     "systemPromptFilesHint": "每行一个路径。每次启动时读取内容并附加到系统提示（--append-system-prompt），不会动到项目内的任何文件。",
     "addDirs": "附加目录",
     "addDirsHint": "每行一个路径——允许 Claude 访问的额外目录（--add-dir）。",
+    "addDirsClaudeMd": "同时载入这些目录的 CLAUDE.md",
     "settingsJson": "设置覆盖（JSON）",
     "settingsJsonHint": "并入本 session 的 --settings 文件，例如 {\"includeCoAuthoredBy\": false}。",
     "settingsJsonInvalid": "必须是 JSON 对象",
