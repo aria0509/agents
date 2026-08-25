@@ -5,7 +5,7 @@
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { writeFileSync, mkdirSync, copyFileSync, existsSync, renameSync, rmSync } from 'node:fs'
+import { writeFileSync, mkdirSync, copyFileSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import pty from 'node-pty'
@@ -143,11 +143,19 @@ export async function claudeLogout(configDir: string): Promise<void> {
  * local hook server. NEVER write into <configDir>/settings.json — profiles may
  * symlink-share it (claude-switch convention).
  */
-export function writeSessionSettings(dir: string, sessionId: string, hookPort: number): string {
+export function writeSessionSettings(
+  dir: string,
+  sessionId: string,
+  hookPort: number,
+  overrides?: Record<string, unknown>
+): string {
   const post = (event: string): string =>
     `curl -sS -m 3 -X POST --data-binary @- http://127.0.0.1:${hookPort}/e/${sessionId}/${event}`
   const hook = (event: string) => [{ hooks: [{ type: 'command', command: post(event) }] }]
   const settings = {
+    // user overrides first (e.g. {"includeCoAuthoredBy": false}) — our
+    // statusLine/hooks always win, session tracking depends on them
+    ...overrides,
     statusLine: { type: 'command', command: post('statusline') },
     hooks: {
       SessionStart: hook('SessionStart'),
@@ -482,6 +490,8 @@ export function sessionArgs(opts: {
   model?: string | null
   effort?: string | null
   permissionMode?: string | null
+  addDirs?: string[]
+  appendSystemPrompt?: string | null
 }): string[] {
   const args = ['--settings', opts.settingsFile]
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId)
@@ -489,7 +499,40 @@ export function sessionArgs(opts: {
   // the flag only accepts plain levels — ultracode is re-applied via /effort
   if (opts.effort && opts.effort !== 'ultracode') args.push('--effort', opts.effort)
   if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode)
+  for (const d of opts.addDirs ?? []) args.push('--add-dir', expandHome(d))
+  // one argv element — content with spaces/newlines needs no shell quoting here
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt)
   const extra = opts.launchArgs.trim()
   if (extra) args.push(...extra.split(/\s+/))
   return args
+}
+
+/** no shell in the spawn path, so `~/…` form inputs must be expanded here */
+const expandHome = (p: string): string => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(2)) : p)
+
+/** Concatenated contents of the session's system-prompt files, read fresh on
+ *  every spawn so edits apply on the next start; missing files are skipped. */
+export function readSystemPrompt(paths: string[]): string | null {
+  const parts: string[] = []
+  for (const p of paths) {
+    try {
+      parts.push(readFileSync(expandHome(p), 'utf8'))
+    } catch {
+      /* gone/unreadable — skip */
+    }
+  }
+  const joined = parts.join('\n\n').trim()
+  return joined || null
+}
+
+/** Parse the user's settings-overrides JSON (validated in the form); anything
+ *  invalid degrades to undefined here rather than blocking a spawn. */
+export function parseSettingsOverrides(text: string): Record<string, unknown> | undefined {
+  if (!text.trim()) return undefined
+  try {
+    const v: unknown = JSON.parse(text)
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
+  } catch {
+    return undefined
+  }
 }

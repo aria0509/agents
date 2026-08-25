@@ -100,6 +100,7 @@ const api: IpcApi = {
   getAppInfo: () => invoke('getAppInfo'),
   getState: () => invoke('getState'),
   pickDirectory: () => invoke('pickDirectory'),
+  pickFiles: () => invoke('pickFiles'),
 
   discoverAccounts: () => invoke('discoverAccounts'),
   registerAccount: (input) => invoke('registerAccount', input),

@@ -18,6 +18,8 @@ import {
   isTrustPrompt,
   isTuiReady,
   moveTranscript,
+  parseSettingsOverrides,
+  readSystemPrompt,
   sessionArgs,
   writeSessionSettings
 } from './claude-cli'
@@ -124,6 +126,11 @@ export class SessionManager extends EventEmitter {
       'sessions',
       prev.map((s) => ({
         ...s,
+        // fields added after a session was persisted arrive undefined — fill
+        // them once here so every later read/compare can trust the shape
+        systemPromptFiles: s.systemPromptFiles ?? [],
+        addDirs: s.addDirs ?? [],
+        settingsJson: s.settingsJson ?? '',
         poppedOut: false,
         state: 'exited' as const,
         ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
@@ -162,9 +169,12 @@ export class SessionManager extends EventEmitter {
       order: Math.max(0, ...this.list().map((s) => s.order + 1)),
       poppedOut: false,
       model: null,
-      effort: null,
-      modelId: null,
-      mode: null,
+      effort: input.effort,
+      modelId: input.modelId,
+      mode: input.mode,
+      systemPromptFiles: input.systemPromptFiles,
+      addDirs: input.addDirs,
+      settingsJson: input.settingsJson,
       draft: null
     }
     this.store.set('sessions', [...this.list(), session])
@@ -244,13 +254,17 @@ export class SessionManager extends EventEmitter {
     if (patch.modelId !== undefined) p.modelId = patch.modelId
     if (patch.effort !== undefined) p.effort = patch.effort
     if (patch.mode !== undefined) p.mode = patch.mode
-    // model/effort/mode are launch flags — respawn a live (idle) session so the
+    if (patch.systemPromptFiles !== undefined) p.systemPromptFiles = patch.systemPromptFiles
+    if (patch.addDirs !== undefined) p.addDirs = patch.addDirs
+    if (patch.settingsJson !== undefined) p.settingsJson = patch.settingsJson
+    // these are all launch flags — respawn a live (idle) session so the
     // change applies now; a running one keeps its turn and picks them up on the
     // next restart. Kill BEFORE writing the new values: the dying process's
     // last output frames still run the footer/statusline sync, which would
     // overwrite the user's choice with the old mode (live-hit in e2e).
+    const launchKeys = ['modelId', 'effort', 'mode', 'systemPromptFiles', 'addDirs', 'settingsJson'] as const
     const respawn =
-      (['modelId', 'effort', 'mode'] as const).some((k) => patch[k] !== undefined && patch[k] !== session[k]) &&
+      launchKeys.some((k) => patch[k] !== undefined && JSON.stringify(patch[k]) !== JSON.stringify(session[k])) &&
       this.ptys.isAlive(id) &&
       session.state !== 'running'
     if (respawn) {
@@ -365,7 +379,12 @@ export class SessionManager extends EventEmitter {
       this.update(session.id, { effort: null })
     }
     const settingsDir = join(app.getPath('userData'), 'session-settings')
-    const settingsFile = writeSessionSettings(settingsDir, session.id, this.hooks.port)
+    const settingsFile = writeSessionSettings(
+      settingsDir,
+      session.id,
+      this.hooks.port,
+      parseSettingsOverrides(session.settingsJson ?? '')
+    )
     const args = sessionArgs({
       settingsFile,
       launchArgs: session.launchArgs.join(' '),
@@ -373,7 +392,9 @@ export class SessionManager extends EventEmitter {
       model: session.modelId,
       // ultracode was just converted to pendingUltracode above — pass the base level
       effort: session.effort === 'ultracode' ? null : session.effort,
-      permissionMode: session.mode
+      permissionMode: session.mode,
+      addDirs: session.addDirs ?? [],
+      appendSystemPrompt: readSystemPrompt(session.systemPromptFiles ?? [])
     })
     const env = await envFor(session.accountDir)
     // Pinned input box + captured wheel scrolling (claude's alt-screen TUI) is

@@ -26,12 +26,15 @@ function AccountRow({ account, onEdit, onLogin }: { account: Account; onEdit: ()
     ? usageLines(u, { current: t('usage.current'), weekly: t('usage.weekly'), reset: t('account.reset') })
     : null
   const loggedIn = account.loginStatus === 'logged_in'
+  // freshest of auth check and usage refresh — statusline/probe updates keep
+  // usage.updatedAt moving while sessions run, so "updated" must track it too
+  const checkedAt = Math.max(account.authCheckedAt ?? 0, u.updatedAt ?? 0) || null
   const checkedText =
-    account.authCheckedAt == null
+    checkedAt == null
       ? null
-      : Date.now() - account.authCheckedAt < 60_000
+      : Date.now() - checkedAt < 60_000
         ? t('account.justNow')
-        : timeAgo(account.authCheckedAt, i18n.language)
+        : timeAgo(checkedAt, i18n.language)
 
   return (
     <div className="flex items-start gap-3 rounded-md border p-3">

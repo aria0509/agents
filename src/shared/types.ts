@@ -91,6 +91,13 @@ export interface Session {
   /** permission mode (manual/auto/acceptEdits/plan/dontAsk/bypassPermissions),
    *  synced from the TUI footer; restored via --permission-mode on respawn */
   mode: string | null
+  /** files whose fresh contents are appended to the system prompt at every
+   *  spawn (--append-system-prompt) — context that never touches the project */
+  systemPromptFiles: string[]
+  /** extra directories claude may access (--add-dir) */
+  addDirs: string[]
+  /** JSON object text merged into the generated --settings file ('' = none) */
+  settingsJson: string
   /** unsent chat-input draft, persisted so an app restart can't eat typed text */
   draft: string | null
 }

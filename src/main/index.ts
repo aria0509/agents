@@ -236,6 +236,11 @@ function bootstrap(): void {
     const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })
     return r.canceled ? null : r.filePaths[0]
   })
+  handle('pickFiles', async () => {
+    const win = BrowserWindow.getFocusedWindow()
+    const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'] })
+    return r.canceled ? [] : r.filePaths
+  })
 
   handle('discoverAccounts', () => accounts.discover())
   handle('registerAccount', (input: NewAccountInput) => accounts.register(input))

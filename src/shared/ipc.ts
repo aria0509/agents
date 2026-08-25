@@ -14,6 +14,9 @@ export interface SessionConfigPatch {
   modelId?: string | null
   effort?: string | null
   mode?: string | null
+  systemPromptFiles?: string[]
+  addDirs?: string[]
+  settingsJson?: string
 }
 
 /** account fields the user can register/edit */
@@ -47,6 +50,13 @@ export interface NewSessionInput {
   limitRule: LimitRule
   /** raw CLI args string, split on whitespace */
   launchArgs: string
+  /** null = CLI default */
+  modelId: string | null
+  effort: string | null
+  mode: string | null
+  systemPromptFiles: string[]
+  addDirs: string[]
+  settingsJson: string
 }
 
 export interface PtyDataEvent {
@@ -66,6 +76,8 @@ export interface IpcApi {
   getAppInfo(): Promise<{ version: string; electron: string; platform: string }>
   getState(): Promise<AppState>
   pickDirectory(): Promise<string | null>
+  /** multi-select file picker (for system-prompt files) */
+  pickFiles(): Promise<string[]>
 
   // accounts
   discoverAccounts(): Promise<void>
@@ -128,6 +140,7 @@ export const INVOKE_CHANNELS = [
   'getAppInfo',
   'getState',
   'pickDirectory',
+  'pickFiles',
   'discoverAccounts',
   'registerAccount',
   'updateAccountNote',
