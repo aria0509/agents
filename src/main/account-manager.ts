@@ -146,10 +146,22 @@ export class AccountManager {
     this.probing.add(configDir)
     try {
       const usage = await fetchUsage(configDir) // best-effort (scrapes claude /usage)
-      if (usage) this.update(configDir, { usage }) // full replace — also clears limitedUntil
+      // Full replace, but NEVER let a routine scrape lift a live banner-set park:
+      // markRateLimited() itself kicks a probe, and a per-model/Opus limit fires a
+      // banner while the panel still reads < 100%. Clearing the park here bounced
+      // the session straight back onto the limited account — an endless switch
+      // loop. The park expires on its own at limitedUntil (the window reset).
+      if (usage) this.update(configDir, { usage: { ...usage, limitedUntil: this.livePark(configDir) ?? usage.limitedUntil } })
     } finally {
       this.probing.delete(configDir)
     }
+  }
+
+  /** A still-future banner-set exhaustion park for this account, else null.
+   *  Usage writes carry it forward so only elapsed time clears it. */
+  private livePark(configDir: string): number | null {
+    const until = this.get(configDir)?.usage.limitedUntil
+    return until != null && until > Date.now() ? until : null
   }
 
   /** Startup: auth for everyone concurrently (fast, no usage probes). */
@@ -169,12 +181,15 @@ export class AccountManager {
   }
 
   /** Called by SessionManager when a statusline event carries rate_limits.
-   *  Statusline data only arrives on a successful API round-trip, so any
-   *  banner-marked exhaustion is over. */
+   *  A statusline round-trip does NOT prove recovery — one posts on the same
+   *  turn a limit banner ends — so it must not lift a live park either; only the
+   *  park's own expiry (the window reset) clears it. */
   updateUsage(configDir: string, usage: Partial<AccountUsage>): void {
     const account = this.get(configDir)
     if (!account) return
-    this.update(configDir, { usage: { ...account.usage, ...usage, limitedUntil: null, updatedAt: Date.now() } })
+    this.update(configDir, {
+      usage: { ...account.usage, ...usage, limitedUntil: this.livePark(configDir), updatedAt: Date.now() }
+    })
   }
 
   /** A session on this account just saw claude's "limit hit" banner. Remember

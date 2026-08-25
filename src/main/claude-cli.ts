@@ -236,6 +236,22 @@ export function isTrustPrompt(text: string): boolean {
 }
 
 /**
+ * The disclaimer claude shows at startup whenever it launches in bypass-
+ * permissions mode (we restore it via `--permission-mode bypassPermissions`).
+ * claude gates the mode on a `bypassPermissionsModeAccepted` config flag that it
+ * only writes on a clean exit — and we SIGKILL on every switch/respawn, so it
+ * never persists and this screen returns every time. The pre-selected option is
+ * "1. No, exit" (NOT a plain Enter-to-accept like the trust prompt), so the
+ * caller must move to "2. Yes, I accept" before confirming. Matched on the
+ * warning AND an option line so a resumed transcript merely mentioning the mode
+ * can't trip it.
+ */
+export function isBypassWarning(text: string): boolean {
+  const s = stripAnsi(text)
+  return /bypass\s*permissions\s*mode/i.test(s) && /Yes,\s*I\s*accept|No,\s*exit/i.test(s)
+}
+
+/**
  * Whether the TUI has rendered its interactive input box. Until then, a pasted
  * submission lands in the input buffer but the trailing Enter gets eaten —
  * e.g. while `--resume` is still replaying a transcript (seen live). Signals,

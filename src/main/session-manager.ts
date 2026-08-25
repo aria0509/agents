@@ -15,6 +15,7 @@ import {
   detectRateLimit,
   detectUltracode,
   envFor,
+  isBypassWarning,
   isTrustPrompt,
   isTuiReady,
   moveTranscript,
@@ -230,6 +231,7 @@ export class SessionManager extends EventEmitter {
     this.clearResetTimer(id)
     this.tail.delete(id)
     this.trusted.delete(id)
+    this.bypassAccepted.delete(id)
     this.resuming.delete(id)
     this.pendingContinue.delete(id)
     this.pendingUltracode.delete(id)
@@ -376,6 +378,7 @@ export class SessionManager extends EventEmitter {
     // Remember the intent and re-apply once the new process is ready; the label
     // must still reset now so a failed re-apply can't leave it lying.
     this.tail.delete(session.id)
+    this.bypassAccepted.delete(session.id) // the new process shows the disclaimer afresh
     this.clearSends(session.id) // queued submits from a prior incarnation must not fire into this one
     if (session.effort === 'ultracode') {
       this.pendingUltracode.add(session.id)
@@ -427,6 +430,9 @@ export class SessionManager extends EventEmitter {
 
   /** sessions whose trust prompt we've already auto-confirmed */
   private trusted = new Set<string>()
+  /** sessions whose bypass-permissions disclaimer we've auto-accepted this
+   *  process (re-armed on every spawn — claude re-shows it each launch) */
+  private bypassAccepted = new Set<string>()
   /** sessions currently attempting a `--resume` (watch for a failed resume) */
   private resuming = new Set<string>()
   /** rolling tail of recent pty output per session (prompts can span chunks) */
@@ -445,6 +451,17 @@ export class SessionManager extends EventEmitter {
     if (!this.trusted.has(id) && isTrustPrompt(buf)) {
       this.trusted.add(id)
       setTimeout(() => this.ptys.write(id, '\r'), 500)
+    }
+    // auto-accept the bypass-permissions disclaimer when restoring that mode.
+    // Its default is "No, exit", so move DOWN to "Yes, I accept" then confirm —
+    // and do it fast: a bare Enter from anywhere else would select "No, exit"
+    // and drop the session into an exit→respawn→disclaimer loop.
+    if (!this.bypassAccepted.has(id) && isBypassWarning(buf)) {
+      this.bypassAccepted.add(id)
+      setTimeout(() => {
+        this.ptys.write(id, '\x1b[B') // ↓ : No, exit → Yes, I accept
+        setTimeout(() => this.ptys.write(id, '\r'), 150)
+      }, 400)
     }
     // input box is up — queued submissions may now actually land
     if (!this.tuiReady.has(id) && isTuiReady(buf)) {

@@ -23,7 +23,9 @@ export interface AccountUsage {
   /** per-model weekly windows (e.g. Fable), from the /usage panel probe only */
   weeklyModels: { name: string; percent: number; resetsAt: number | null }[]
   /** claude showed a "limit hit" banner: treat the account as exhausted until
-   *  this time (cleared by the next probe or successful statusline update) */
+   *  this time (the window reset, or +30min when unknown). Authoritative — a
+   *  usage probe or statusline must NOT lift it early, only its own expiry does,
+   *  or auto-switch bounces the session back onto the still-limited account */
   limitedUntil: number | null
   /** epoch ms of last successful refresh */
   updatedAt: number | null
