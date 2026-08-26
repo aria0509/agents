@@ -10,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useApp, accountName } from '@/stores/app'
 import { SessionBody } from '@/components/session-body'
 import { ChatInput } from '@/components/chat-input'
+import { EditableTitle } from '@/components/editable-title'
 import { SessionSettingsDialog } from '@/components/session-settings-dialog'
 import { hasUsage, usageLines } from '@/lib/usage'
 import { cn } from '@/lib/utils'
@@ -36,7 +37,6 @@ export function SessionCard({ session }: { session: SessionView }) {
   const active = focusedId === session.id && session.alive && !session.poppedOut
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: session.id })
 
-  const heading = session.title ?? session.cwd.split('/').filter(Boolean).pop() ?? session.cwd
   const usage = account && hasUsage(account.usage)
     ? usageLines(account.usage, { current: t('usage.current'), weekly: t('usage.weekly'), reset: t('account.reset') })
     : null
@@ -90,7 +90,7 @@ export function SessionCard({ session }: { session: SessionView }) {
           <Tooltip>
             <TooltipTrigger asChild>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{heading}</div>
+                <EditableTitle session={session} />
                 <div className="text-muted-foreground truncate text-xs">
                   {accountName(accounts, session.accountDir)}
                   {session.model ? ` · ${session.model}` : ''}

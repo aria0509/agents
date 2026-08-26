@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next'
 import { useApp, accountName } from '@/stores/app'
 import { SessionBody } from '@/components/session-body'
 import { ChatInput } from '@/components/chat-input'
+import { EditableTitle } from '@/components/editable-title'
 import { hasUsage, usageLines } from '@/lib/usage'
 
 /** Whole-window view of a single session, rendered in a pop-out window. */
@@ -20,7 +21,6 @@ export function StandaloneSession({ sessionId }: { sessionId: string }) {
     )
   }
 
-  const heading = session.title ?? session.cwd.split('/').filter(Boolean).pop() ?? session.cwd
   const usage =
     account && hasUsage(account.usage)
       ? usageLines(account.usage, { current: t('usage.current'), weekly: t('usage.weekly'), reset: t('account.reset') })
@@ -38,8 +38,9 @@ export function StandaloneSession({ sessionId }: { sessionId: string }) {
       {/* left→right: (1) title / work dir  (2) model / effort  (3) account + usage.
           pl-20 clears the macOS traffic-light buttons */}
       <div className="flex h-14 shrink-0 items-center gap-6 border-b pr-4 pl-20 text-xs leading-tight [-webkit-app-region:drag]">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{heading}</div>
+        {/* no-drag: the title must receive clicks (edit-in-place) despite the draggable header */}
+        <div className="min-w-0 [-webkit-app-region:no-drag]">
+          <EditableTitle session={session} />
           <div className="text-muted-foreground truncate">{session.cwd}</div>
         </div>
         <div className="text-muted-foreground min-w-0">
