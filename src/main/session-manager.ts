@@ -21,6 +21,7 @@ import {
   linkSessionRegistry,
   moveTranscript,
   parseSettingsOverrides,
+  preselectsExit,
   readSystemPrompt,
   sessionArgs,
   writeSessionSettings
@@ -451,10 +452,17 @@ export class SessionManager extends EventEmitter {
     // Only the retained tail is capped (3000 is enough to bridge a split token).
     const buf = (this.tail.get(id) ?? '') + data
     this.tail.set(id, buf.slice(-3000))
-    // auto-confirm claude's first-run "trust this folder" prompt (pre-selected Yes)
+    // auto-confirm claude's first-run "trust this folder" prompt. Its default is
+    // now "❯ No, exit" (a bare Enter QUITS claude — the account-switch resume then
+    // dies on the new account), so move DOWN to "Yes, I trust this folder" first,
+    // like the bypass disclaimer below. Decide at send time: the options paint a
+    // beat after the heading, so re-read the tail then rather than trust `buf`.
     if (!this.trusted.has(id) && isTrustPrompt(buf)) {
       this.trusted.add(id)
-      setTimeout(() => this.ptys.write(id, '\r'), 500)
+      setTimeout(() => {
+        if (preselectsExit(this.tail.get(id) ?? '')) this.ptys.write(id, '\x1b[B') // ↓ → Yes
+        setTimeout(() => this.ptys.write(id, '\r'), 150)
+      }, 500)
     }
     // auto-accept the bypass-permissions disclaimer when restoring that mode.
     // Its default is "No, exit", so move DOWN to "Yes, I accept" then confirm —

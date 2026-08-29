@@ -284,14 +284,29 @@ export function detectRateLimit(text: string): boolean {
 /**
  * The trust prompt claude shows the first time an account opens an untrusted
  * folder — e.g. "Quick safety check: Is this a project you created or one you
- * trust?" (older builds: "Security guide" / "trust this folder"). Enter accepts
- * the pre-selected "yes". Kept broad so a wording change is a one-line fix — this
- * MUST stay current or account-switch resume hangs on the new account's prompt.
+ * trust?" (older builds: "Security guide" / "trust this folder"). Kept broad so
+ * a wording change is a one-line fix — this MUST stay current or account-switch
+ * resume hangs on the new account's prompt. ⚠️ The affirmative option is NO
+ * LONGER the Enter default (see preselectsExit): a bare Enter now quits claude.
  */
 export function isTrustPrompt(text: string): boolean {
   return /trust\s*this\s*folder|Security\s*guide|safety\s*check|created\s*or\s*one\s*you\s*trust|Do\s*you\s*trust/i.test(
     stripAnsi(text)
   )
+}
+
+/**
+ * Whether a first-run prompt pre-selects the destructive "No, exit" option, so a
+ * bare Enter would QUIT claude and the caller must arrow DOWN onto the
+ * affirmative choice first. The current "Quick safety check" trust prompt does
+ * exactly this — "❯ No, exit" is the default, "Yes, I trust this folder" the
+ * line below (same shape as the bypass disclaimer). Left un-handled, the usage
+ * probe gets nothing (per-model/Fable usage never loads) and an account-switch
+ * resume dies on the new account. Returns false for screens a plain Enter
+ * accepts (theme picker, "Press Enter to continue", non-exiting trust variants).
+ */
+export function preselectsExit(text: string): boolean {
+  return /No,\s*exit/i.test(stripAnsi(text))
 }
 
 /**
@@ -536,8 +551,16 @@ async function probeUsage(configDir: string): Promise<AccountUsage | null> {
           }, 250)
         } else if (advances < 5 && isAdvancePrompt(buf)) {
           advances++ // once per screen: clearing buf re-arms for the next one
+          const down = preselectsExit(buf) // trust prompt defaults to "❯ No, exit"
           buf = ''
-          proc.write('\r')
+          if (down) proc.write('\x1b[B') // ↓ : No, exit → Yes, I trust this folder
+          setTimeout(() => {
+            try {
+              proc.write('\r') // confirm (a beat after ↓ so the repaint settles)
+            } catch {
+              /* probe already ended */
+            }
+          }, down ? 150 : 0)
         }
         return
       }
