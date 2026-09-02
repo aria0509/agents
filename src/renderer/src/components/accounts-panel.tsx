@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { FolderOpen, LogIn, Pencil, RefreshCw, ScanSearch } from 'lucide-react'
+import { FolderOpen, Loader2, LogIn, Pencil, RefreshCw, ScanSearch } from 'lucide-react'
 import type { Account, LoginStatus } from '@shared/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -21,16 +21,24 @@ const STATUS_VARIANT: Record<LoginStatus, 'default' | 'secondary' | 'destructive
 function AccountRow({ account, onEdit, onLogin }: { account: Account; onEdit: () => void; onLogin: () => void }) {
   const { t, i18n } = useTranslation()
   const [busy, setBusy] = useState(false)
+  // relative times ("updated 3 min ago", "reset 12m") are computed at render;
+  // with idle sessions nothing re-renders, so tick them along every 30s
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 30_000)
+    return () => clearInterval(id)
+  }, [])
   const u = account.usage
   const lines = hasUsage(u)
     ? usageLines(u, { current: t('usage.current'), weekly: t('usage.weekly'), reset: t('account.reset') })
     : null
   const loggedIn = account.loginStatus === 'logged_in'
-  // freshest of auth check and usage refresh — statusline/probe updates keep
-  // usage.updatedAt moving while sessions run, so "updated" must track it too
-  const checkedAt = Math.max(account.authCheckedAt ?? 0, u.updatedAt ?? 0) || null
-  const checkedText =
-    checkedAt == null
+  // when the USAGE numbers last moved (statusline patch or panel probe) — an
+  // auth check alone must not make stale numbers look fresh
+  const checkedAt = u.updatedAt ?? account.authCheckedAt
+  const checkedText = account.usageRefreshing
+    ? t('account.updating')
+    : checkedAt == null
       ? null
       : Date.now() - checkedAt < 60_000
         ? t('account.justNow')
@@ -57,31 +65,30 @@ function AccountRow({ account, onEdit, onLogin }: { account: Account; onEdit: ()
           </div>
         )}
         {checkedText && (
-          <div className="text-muted-foreground/70 text-xs">
-            {t('account.refreshedAt')} {checkedText}
+          <div className="text-muted-foreground/70 flex items-center gap-1 text-xs">
+            {account.usageRefreshing && <Loader2 className="size-3 animate-spin" />}
+            {account.usageRefreshing ? checkedText : `${t('account.refreshedAt')} ${checkedText}`}
           </div>
         )}
       </div>
       <div className="flex shrink-0 items-center">
-        {loggedIn ? (
-          // logged in → re-check status + usage
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={t('account.refresh')}
-            disabled={busy}
-            onClick={() =>
-              void (async () => {
-                setBusy(true)
-                await window.api.refreshAuth(account.configDir)
-                setBusy(false)
-              })()
-            }
-          >
-            <RefreshCw className={busy ? 'animate-spin' : ''} />
-          </Button>
-        ) : (
-          // not logged in → start the OAuth login flow
+        {/* re-check status + usage — also how a login done in an outside terminal gets picked up */}
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t('account.refresh')}
+          disabled={busy}
+          onClick={() =>
+            void (async () => {
+              setBusy(true)
+              await window.api.refreshAuth(account.configDir)
+              setBusy(false)
+            })()
+          }
+        >
+          <RefreshCw className={busy ? 'animate-spin' : ''} />
+        </Button>
+        {!loggedIn && (
           <Button variant="ghost" size="icon" aria-label={t('account.login')} onClick={onLogin}>
             <LogIn />
           </Button>

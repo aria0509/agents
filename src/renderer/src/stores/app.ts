@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Account } from '@shared/types'
+import type { Account, SessionState } from '@shared/types'
 import type { AppState, SessionView } from '@shared/ipc'
 
 const CARD_SIZE_KEY = 'agents-card-size'
@@ -19,15 +19,18 @@ interface AppStore extends AppState {
   /** the card a file is currently being dragged over (drop-zone highlight), or null */
   dragOverId: string | null
   setDragOverId: (id: string | null) => void
-  /** sidebar filter: show only sessions with this cwd (null = all) */
+  /** sidebar filters: only sessions in this cwd / this state (null = any); both apply */
   groupFilter: string | null
   setGroupFilter: (cwd: string | null) => void
+  stateFilter: SessionState | null
+  setStateFilter: (state: SessionState | null) => void
 }
 
 export const useApp = create<AppStore>((set) => ({
   accounts: [],
   sessions: [],
   recentLaunchArgs: [],
+  knownModels: [],
   focusedId: null,
   setFocused: (id) => set({ focusedId: id }),
   cardSize: clampSize(Number(localStorage.getItem(CARD_SIZE_KEY)) || 480),
@@ -42,7 +45,9 @@ export const useApp = create<AppStore>((set) => ({
   dragOverId: null,
   setDragOverId: (id) => set((s) => (s.dragOverId === id ? s : { dragOverId: id })),
   groupFilter: null,
-  setGroupFilter: (cwd) => set({ groupFilter: cwd })
+  setGroupFilter: (cwd) => set({ groupFilter: cwd }),
+  stateFilter: null,
+  setStateFilter: (state) => set({ stateFilter: state })
 }))
 
 // hydrate once (including persisted drafts — typed text survives app restarts)

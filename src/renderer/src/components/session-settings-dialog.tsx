@@ -48,7 +48,8 @@ export function SessionSettingsDialog({ sessionId, onClose }: { sessionId: strin
         systemPromptFiles: splitLines(values.systemPromptFiles),
         addDirs: splitLines(values.addDirs),
         addDirClaudeMd: values.addDirClaudeMd,
-        settingsJson: values.settingsJson.trim()
+        settingsJson: values.settingsJson.trim(),
+        stopOnFallback: values.stopOnFallback
       })
       if (values.accountDir !== session.accountDir) await window.api.switchAccount(session.id, values.accountDir)
       onClose()

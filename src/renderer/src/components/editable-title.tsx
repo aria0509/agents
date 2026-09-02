@@ -4,11 +4,12 @@ import { cn } from '@/lib/utils'
 
 /**
  * Session title: click to edit in place, blur/Enter saves, Escape cancels.
- * An empty value clears the custom title back to the cwd-basename fallback.
+ * An empty value clears the custom title back to the fallback: claude's own
+ * title (its /rename name or AI summary), else the cwd basename.
  */
 export function EditableTitle({ session, className }: { session: SessionView; className?: string }) {
   const [editing, setEditing] = useState(false)
-  const fallback = session.cwd.split('/').filter(Boolean).pop() ?? session.cwd
+  const fallback = session.cliTitle ?? session.cwd.split('/').filter(Boolean).pop() ?? session.cwd
 
   if (!editing)
     return (

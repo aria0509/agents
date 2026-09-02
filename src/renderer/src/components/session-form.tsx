@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import { FilePlus2, FolderOpen, FolderPlus } from 'lucide-react'
-import type { Account, LimitRule, Session } from '@shared/types'
+import type { Account, LimitRule, ModelOption, Session } from '@shared/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,18 +13,30 @@ import { hasUsage, usageLines } from '@/lib/usage'
 import { useApp } from '@/stores/app'
 
 const LIMIT_RULES: LimitRule[] = ['auto-switch', 'manual', 'wait-and-continue']
-/** display-name → model id; "default" keeps whatever the CLI decides */
-const MODELS = [
-  ['Fable 5', 'claude-fable-5'],
-  ['Opus 5', 'claude-opus-5'],
-  ['Sonnet 5', 'claude-sonnet-5'],
-  ['Haiku 4.5', 'claude-haiku-4-5']
-] as const
+/** built-in presets; models the CLI has actually reported are appended at
+ *  render time (modelOptions), and "default" keeps whatever the CLI decides */
+const MODELS: ModelOption[] = [
+  { name: 'Fable 5.1', id: 'claude-fable-5-1' },
+  { name: 'Fable 5', id: 'claude-fable-5' },
+  { name: 'Opus 5', id: 'claude-opus-5' },
+  { name: 'Sonnet 5', id: 'claude-sonnet-5' },
+  { name: 'Haiku 4.5', id: 'claude-haiku-4-5' }
+]
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const
 const MODES = ['manual', 'auto', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'] as const
 // Select can't take '' as an item value — '' in SessionFormValues maps to these
 const DEFAULT = '__default__'
 const AUTO = '__auto__'
+
+/** presets, then every reported model that isn't one, then the form's current
+ *  id (a session set to a since-unseen model must not render a blank select) */
+const modelOptions = (known: ModelOption[], current: string): ModelOption[] => {
+  const out = [...MODELS]
+  for (const m of [...known, { id: current, name: current }]) {
+    if (m.id && !out.some((o) => o.id === m.id)) out.push(m)
+  }
+  return out
+}
 
 /** One state shape shared by the create and edit dialogs, so both render the
  *  exact same form. Multi-value fields stay as raw textarea text ('' = none,
@@ -44,6 +56,7 @@ export interface SessionFormValues {
   addDirs: string
   addDirClaudeMd: boolean
   settingsJson: string
+  stopOnFallback: boolean
 }
 
 export const emptySessionForm: SessionFormValues = {
@@ -58,7 +71,8 @@ export const emptySessionForm: SessionFormValues = {
   systemPromptFiles: '',
   addDirs: '',
   addDirClaudeMd: false,
-  settingsJson: ''
+  settingsJson: '',
+  stopOnFallback: false
 }
 
 export const sessionFormValues = (s: Session): SessionFormValues => ({
@@ -73,7 +87,8 @@ export const sessionFormValues = (s: Session): SessionFormValues => ({
   systemPromptFiles: (s.systemPromptFiles ?? []).join('\n'),
   addDirs: (s.addDirs ?? []).join('\n'),
   addDirClaudeMd: s.addDirClaudeMd ?? false,
-  settingsJson: s.settingsJson ?? ''
+  settingsJson: s.settingsJson ?? '',
+  stopOnFallback: s.stopOnFallback ?? false
 })
 
 export const splitLines = (v: string): string[] =>
@@ -136,6 +151,7 @@ export function SessionForm({
 }) {
   const { t } = useTranslation()
   const accounts = useApp((s) => s.accounts)
+  const knownModels = useApp((s) => s.knownModels)
   const selected = accounts.find((a) => a.configDir === values.accountDir)
   const appendLines = (field: 'systemPromptFiles' | 'addDirs', paths: string[]): void => {
     if (!paths.length) return
@@ -212,9 +228,9 @@ export function SessionForm({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={DEFAULT}>{t('session.optionDefault')}</SelectItem>
-              {MODELS.map(([name, id]) => (
-                <SelectItem key={id} value={id}>
-                  {name}
+              {modelOptions(knownModels, values.modelId).map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -254,6 +270,18 @@ export function SessionForm({
         </div>
       </div>
       <p className="text-muted-foreground -mt-2 text-xs">{t('session.modelEffortHint')}</p>
+      <div className="grid gap-1">
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="accent-primary"
+            checked={values.stopOnFallback}
+            onChange={(e) => onChange({ stopOnFallback: e.target.checked })}
+          />
+          {t('session.stopOnFallback')}
+        </label>
+        <p className="text-muted-foreground text-xs">{t('session.stopOnFallbackHint')}</p>
+      </div>
       <div className="grid gap-2">
         <Label>{t('session.limitRule')}</Label>
         <Select value={values.limitRule} onValueChange={(v) => onChange({ limitRule: v as LimitRule })}>

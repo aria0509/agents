@@ -1,18 +1,21 @@
 import Store from 'electron-store'
-import type { Account, Session } from '../shared/types'
+import type { Account, ModelOption, Session } from '../shared/types'
 
 interface Schema {
   accounts: Account[]
   sessions: Session[]
   /** recently used launch-args strings, most-recent first (max 10) */
   recentLaunchArgs: string[]
+  /** every model the statusline has ever reported — the model picker lists
+   *  these after its built-in presets, so a new release needs no app update */
+  knownModels: ModelOption[]
 }
 
 export type AppStore = Store<Schema>
 
 export function createStore(): AppStore {
   return new Store<Schema>({
-    defaults: { accounts: [], sessions: [], recentLaunchArgs: [] }
+    defaults: { accounts: [], sessions: [], recentLaunchArgs: [], knownModels: [] }
   })
 }
 

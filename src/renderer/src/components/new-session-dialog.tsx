@@ -33,7 +33,8 @@ export function NewSessionDialog({ open, onClose }: { open: boolean; onClose: ()
         systemPromptFiles: splitLines(values.systemPromptFiles),
         addDirs: splitLines(values.addDirs),
         addDirClaudeMd: values.addDirClaudeMd,
-        settingsJson: values.settingsJson.trim()
+        settingsJson: values.settingsJson.trim(),
+        stopOnFallback: values.stopOnFallback
       })
       setValues(emptySessionForm)
       onClose()

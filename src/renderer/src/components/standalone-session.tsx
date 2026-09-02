@@ -3,7 +3,9 @@ import { useApp, accountName } from '@/stores/app'
 import { SessionBody } from '@/components/session-body'
 import { ChatInput } from '@/components/chat-input'
 import { EditableTitle } from '@/components/editable-title'
+import { STATE_DOT } from '@/lib/session-state'
 import { hasUsage, usageLines } from '@/lib/usage'
+import { cn } from '@/lib/utils'
 
 /** Whole-window view of a single session, rendered in a pop-out window. */
 export function StandaloneSession({ sessionId }: { sessionId: string }) {
@@ -35,13 +37,18 @@ export function StandaloneSession({ sessionId }: { sessionId: string }) {
           </span>
         </div>
       )}
-      {/* left→right: (1) title / work dir  (2) model / effort  (3) account + usage.
-          pl-20 clears the macOS traffic-light buttons */}
+      {/* left→right: (1) state dot + title / state + work dir  (2) model / effort
+          (3) account + usage. pl-20 clears the macOS traffic-light buttons */}
       <div className="flex h-14 shrink-0 items-center gap-6 border-b pr-4 pl-20 text-xs leading-tight [-webkit-app-region:drag]">
         {/* no-drag: the title must receive clicks (edit-in-place) despite the draggable header */}
         <div className="min-w-0 [-webkit-app-region:no-drag]">
-          <EditableTitle session={session} />
-          <div className="text-muted-foreground truncate">{session.cwd}</div>
+          <div className="flex items-center gap-2">
+            <span className={cn('size-2 shrink-0 rounded-full', STATE_DOT[session.state])} />
+            <EditableTitle session={session} />
+          </div>
+          <div className="text-muted-foreground truncate">
+            {t(`session.state.${session.state}`)} · {session.cwd}
+          </div>
         </div>
         <div className="text-muted-foreground min-w-0">
           <div className="truncate">{session.model ?? '—'}</div>

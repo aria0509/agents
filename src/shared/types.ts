@@ -51,6 +51,13 @@ export interface Account {
   /** epoch ms of the last auth status check */
   authCheckedAt: number | null
   usage: AccountUsage
+  /** a /usage probe is in flight (runtime only, never persisted) */
+  usageRefreshing?: boolean
+  /** a `claude auth login` process is alive for this account (runtime only) */
+  loginActive?: boolean
+  /** the last line that login process printed before ending (runtime only) —
+   *  "Login successful." or the CLI's failure reason */
+  loginVerdict?: string | null
 }
 
 /** What to do when a session's account hits its usage limit. */
@@ -71,6 +78,9 @@ export interface Session {
   id: string
   /** optional user-set title shown on the card */
   title: string | null
+  /** claude's own title, mirrored from the statusline's session_name: the
+   *  /rename name, else its AI-generated summary — shown when `title` is unset */
+  cliTitle: string | null
   /** Claude Code's own session id (from SessionStart hook), used for --resume */
   claudeSessionId: string | null
   /** full path to the session jsonl (from SessionStart hook); moved on account switch */
@@ -105,6 +115,18 @@ export interface Session {
   settingsJson: string
   /** unsent chat-input draft, persisted so an app restart can't eat typed text */
   draft: string | null
+  /** interrupt the turn and notify when the CLI swaps the session onto another
+   *  model by itself (Fable safeguards → Opus, overload…) */
+  stopOnFallback: boolean
+  /** the model id the CLI fell back to, while it differs from modelId */
+  fallbackModel: string | null
+}
+
+/** a `--model` choice: id exactly as the CLI reports it (may carry a `[1m]`
+ *  context suffix) plus its display name */
+export interface ModelOption {
+  id: string
+  name: string
 }
 
 export type Theme = 'light' | 'dark' | 'system'

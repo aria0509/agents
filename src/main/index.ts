@@ -13,9 +13,11 @@ import {
   type NewSessionInput,
   type SessionConfigPatch
 } from '../shared/ipc'
+import { updateClaudeCli } from './claude-cli'
 import { createStore } from './store'
 import { AccountManager } from './account-manager'
-import { SessionManager, type NotifyKind } from './session-manager'
+import { PtyManager } from './pty-manager'
+import { SessionManager, type NotifyEvent, type NotifyKind } from './session-manager'
 import { UpdateManager } from './update-manager'
 import { WindowManager } from './window-manager'
 
@@ -27,9 +29,9 @@ app.setPath(
 )
 
 const NOTIFY_TEXT: Record<string, Record<NotifyKind, string>> = {
-  'zh-Hant': { attention: '需要處理', done: '任務完成', 'rate-limited': '已達限額' },
-  'zh-Hans': { attention: '需要处理', done: '任务完成', 'rate-limited': '已达限额' },
-  en: { attention: 'Needs attention', done: 'Task done', 'rate-limited': 'Rate limited' }
+  'zh-Hant': { attention: '需要處理', done: '任務完成', 'rate-limited': '已達限額', fallback: '模型已回退，已暫停' },
+  'zh-Hans': { attention: '需要处理', done: '任务完成', 'rate-limited': '已达限额', fallback: '模型已回退，已暂停' },
+  en: { attention: 'Needs attention', done: 'Task done', 'rate-limited': 'Rate limited', fallback: 'Model fell back — paused' }
 }
 const QUIT_TEXT: Record<
   string,
@@ -128,25 +130,28 @@ function bootstrap(): void {
     })
   }
 
-  const accounts = new AccountManager(store, notify)
-  const sessions = new SessionManager(store, accounts, notify)
+  // one pty pool: sessions, and the login processes the account dialog attaches to
+  const ptys = new PtyManager()
+  const accounts = new AccountManager(store, notify, ptys)
+  const sessions = new SessionManager(store, accounts, notify, ptys)
   const state = (): AppState => ({
     accounts: accounts.list(),
     sessions: sessions.views(),
-    recentLaunchArgs: store.get('recentLaunchArgs') ?? []
+    recentLaunchArgs: store.get('recentLaunchArgs') ?? [],
+    knownModels: store.get('knownModels') ?? []
   })
 
-  sessions.ptys.on('data', (ev) => windows.sendPty(ev))
+  ptys.on('data', (ev) => windows.sendPty(ev))
 
-  sessions.on('notify', ({ id, kind }: { id: string; kind: NotifyKind }) => {
-    if (kind === 'done' && windows.anyFocused()) return
+  // every done / needs-attention / limit / fallback raises an OS notification,
+  // focused window or not — the user asked to be told, not to have to look
+  sessions.on('notify', ({ id, kind, detail }: NotifyEvent) => {
     if (!Notification.isSupported()) return
     const session = sessions.get(id)
     if (!session) return
-    const n = new Notification({
-      title: locale(NOTIFY_TEXT)[kind],
-      body: `${session.title ?? dirLabel(session.cwd)} · ${accounts.get(session.accountDir)?.name ?? ''}`
-    })
+    const who = `${session.title ?? session.cliTitle ?? dirLabel(session.cwd)} · ${accounts.get(session.accountDir)?.name ?? ''}`
+    if (process.env['AGENTS_LOG_NOTIFY']) console.log(`[notify] ${kind} ${who}${detail ? ` — ${detail}` : ''}`) // e2e hook
+    const n = new Notification({ title: locale(NOTIFY_TEXT)[kind], body: detail ? `${who}\n${detail}` : who })
     n.on('click', () => {
       if (session.poppedOut) windows.focusPoppedOut(id)
       else {
@@ -162,11 +167,15 @@ function bootstrap(): void {
   // if any were still active last time, offer to resume those once the window has loaded
   const activeCount = sessions.restoreAsExited()
 
+  // self-update the claude CLI on every launch (~1.5s when already current).
+  // Auth checks are cheap and go right away; the usage probes and the session
+  // restore below wait for it so every claude we spawn runs the new binary.
+  const cliUpdated = updateClaudeCli()
   // refresh auth for every account (fast), then probe usage in the background
   // and keep it fresh — auto-switch decisions must not run on day-old numbers.
   // Each probe scrapes that account's own /usage panel (fetchUsage, ~15s).
-  void accounts.refreshAllAuth().then(() => accounts.refreshAllUsage())
-  setInterval(() => void accounts.refreshAllUsage(), 30 * 60_000)
+  void Promise.all([cliUpdated, accounts.refreshAllAuth()]).then(() => accounts.refreshAllUsage())
+  setInterval(() => void accounts.refreshAllUsage(), 15 * 60_000)
 
   // app/dock icon (packaging uses assets/icon.png too; this covers dev)
   const appIcon = nativeImage.createFromPath(iconPath())
@@ -276,8 +285,8 @@ function bootstrap(): void {
   })
   handle('ptyWrite', (id: string, data: string) => sessions.write(id, data))
   handle('ptySubmit', (id: string, text: string) => sessions.submit(id, text))
-  handle('ptyResize', (id: string, cols: number, rows: number) => sessions.ptys.resize(id, cols, rows))
-  handle('ptySnapshot', (id: string) => sessions.ptys.snapshot(id))
+  handle('ptyResize', (id: string, cols: number, rows: number) => ptys.resize(id, cols, rows))
+  handle('ptySnapshot', (id: string) => ptys.snapshot(id))
 
   handle('popOutSession', (id: string) => windows.popOut(id))
   handle('focusPoppedOut', (id: string) => windows.focusPoppedOut(id))
@@ -289,7 +298,7 @@ function bootstrap(): void {
   }
   app.on('before-quit', (e) => {
     if (quitting) return shutdownAll()
-    const hasAlive = sessions.list().some((s) => sessions.ptys.isAlive(s.id))
+    const hasAlive = sessions.list().some((s) => ptys.isAlive(s.id))
     if (!hasAlive) {
       quitting = true
       return shutdownAll()
@@ -329,7 +338,7 @@ function bootstrap(): void {
           detail: t.detail.replace('{n}', String(activeCount))
         })
         .then(({ response }) => {
-          if (response === 0) void sessions.restoreActive()
+          if (response === 0) void cliUpdated.then(() => sessions.restoreActive())
         })
     })
   }

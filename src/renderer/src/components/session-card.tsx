@@ -4,7 +4,6 @@ import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, PanelRightOpen, Power, Settings2 } from 'lucide-react'
 import type { SessionView } from '@shared/ipc'
-import type { SessionState } from '@shared/types'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useApp, accountName } from '@/stores/app'
@@ -12,17 +11,9 @@ import { SessionBody } from '@/components/session-body'
 import { ChatInput } from '@/components/chat-input'
 import { EditableTitle } from '@/components/editable-title'
 import { SessionSettingsDialog } from '@/components/session-settings-dialog'
+import { STATE_DOT } from '@/lib/session-state'
 import { hasUsage, usageLines } from '@/lib/usage'
 import { cn } from '@/lib/utils'
-
-const STATE_DOT: Record<SessionState, string> = {
-  idle: 'bg-zinc-400',
-  running: 'bg-blue-500 animate-pulse',
-  'needs-attention': 'bg-amber-500',
-  done: 'bg-emerald-500',
-  'rate-limited': 'bg-red-500',
-  exited: 'bg-zinc-600'
-}
 
 export function SessionCard({ session }: { session: SessionView }) {
   const { t } = useTranslation()
@@ -93,7 +84,7 @@ export function SessionCard({ session }: { session: SessionView }) {
                 <EditableTitle session={session} />
                 <div className="text-muted-foreground truncate text-xs">
                   {accountName(accounts, session.accountDir)}
-                  {session.model ? ` · ${session.model}` : ''}
+                  {session.model ? ` · ${session.model}${session.fallbackModel ? ` (${t('session.fallback')})` : ''}` : ''}
                   {session.effort ? ` · ${session.effort}` : ''}
                 </div>
               </div>

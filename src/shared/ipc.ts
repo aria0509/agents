@@ -2,7 +2,7 @@
  * Typed IPC contract between main and renderer.
  * Every channel is declared here once; both sides import from this file.
  */
-import type { Account, LimitRule, Session } from './types'
+import type { Account, LimitRule, ModelOption, Session } from './types'
 
 /** editable-after-creation session config (README: "後期隨時可以改") */
 export interface SessionConfigPatch {
@@ -18,6 +18,24 @@ export interface SessionConfigPatch {
   addDirs?: string[]
   addDirClaudeMd?: boolean
   settingsJson?: string
+  stopOnFallback?: boolean
+}
+
+/** what `claude auth login` offers, off one pty */
+export interface LoginLinks {
+  /** copy-anywhere link: the code it ends with is pasted back (or typed into the terminal) */
+  manualUrl: string
+  /** same sign-in, but redirecting to the CLI's localhost callback — completes by
+   *  itself when opened on this machine; null if the CLI didn't ask for a browser */
+  browserUrl: string | null
+  /** pty id of the login process, for the dialog's embedded terminal */
+  ptyId: string
+}
+
+export interface LoginResult {
+  ok: boolean
+  /** the CLI's own verdict line ("Invalid code…", "Login failed…"), if it printed one */
+  message: string | null
 }
 
 /** account fields the user can register/edit */
@@ -41,6 +59,8 @@ export interface AppState {
   sessions: SessionView[]
   /** recently used launch-args strings, most-recent first (max 10) */
   recentLaunchArgs: string[]
+  /** models the statusline has reported (any session, ever) — extra picker options */
+  knownModels: ModelOption[]
 }
 
 export interface NewSessionInput {
@@ -59,6 +79,7 @@ export interface NewSessionInput {
   addDirs: string[]
   addDirClaudeMd: boolean
   settingsJson: string
+  stopOnFallback: boolean
 }
 
 export interface PtyDataEvent {
@@ -89,10 +110,10 @@ export interface IpcApi {
   refreshAuth(configDir: string): Promise<void>
   /** refresh usage for all logged-in accounts (may prompt for Keychain access) */
   refreshAllUsage(): Promise<void>
-  /** start OAuth login; resolves with the sign-in URL to show (browser also opens) */
-  startLogin(configDir: string): Promise<string>
-  /** submit the pasted code; resolves true once the account is logged in */
-  submitLoginCode(configDir: string, code: string): Promise<boolean>
+  /** start `claude auth login`; resolves with its sign-in links (no browser opens by itself) */
+  startLogin(configDir: string): Promise<LoginLinks>
+  /** submit the pasted code; ok once the account is logged in */
+  submitLoginCode(configDir: string, code: string): Promise<LoginResult>
   /** abort an in-progress login (dialog closed) */
   cancelLogin(configDir: string): Promise<void>
   /** log an account out */

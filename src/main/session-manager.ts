@@ -6,8 +6,8 @@ import { EventEmitter } from 'node:events'
 import type { AccountUsage, Session, SessionState } from '../shared/types'
 import type { NewSessionInput, SessionConfigPatch, SessionView } from '../shared/ipc'
 import { pushRecentLaunchArgs, type AppStore } from './store'
-import type { AccountManager } from './account-manager'
-import { PtyManager } from './pty-manager'
+import { HEADROOM_PCT, modelFamily, type AccountManager } from './account-manager'
+import type { PtyManager } from './pty-manager'
 import { HookServer, type HookEvent } from './hook-server'
 import {
   claudePath,
@@ -16,6 +16,8 @@ import {
   detectUltracode,
   envFor,
   isBypassWarning,
+  isInterruptNotice,
+  isLoginPrompt,
   isTrustPrompt,
   isTuiReady,
   linkSessionRegistry,
@@ -27,8 +29,30 @@ import {
   writeSessionSettings
 } from './claude-cli'
 
-/** utilization at/above which we proactively switch before submitting */
-const SWITCH_THRESHOLD = 95
+/** background work claude will wake the session for once it finishes — a turn
+ *  ending with any of these in flight is a pause, not "done". Shells, monitors
+ *  and MCP tasks don't count (mirrors the CLI's own wait set): a dev server left
+ *  running would otherwise pin the card on "running" for good. */
+const WAKING_TASK_TYPES = new Set(['local_agent', 'remote_agent', 'in_process_teammate', 'local_workflow'])
+/** Notification hook types that mean the TUI is waiting on the user. Others:
+ *  idle_prompt (claude has been sitting at the prompt), auth_success,
+ *  agent_completed (Stop covers it), push_notification (relayed as-is). */
+const ATTENTION_NOTIFICATIONS = new Set([
+  'permission_prompt',
+  'elicitation_dialog',
+  'elicitation_url_dialog',
+  'agent_needs_input',
+  'worker_permission_prompt'
+])
+/** how long a statusline model mismatch may wait for a user-initiated
+ *  PostModelSwitch to explain it before it counts as an automatic fallback */
+const FALLBACK_GRACE_MS = 2000
+
+/** same model ignoring the 1M-context suffix (`claude-opus-5` vs `claude-opus-5[1m]`) */
+const sameModel = (a: string, b: string): boolean => a.replace(/\[.*$/, '') === b.replace(/\[.*$/, '')
+/** one line of a message for a notification body */
+const snippet = (v: unknown): string | undefined =>
+  typeof v === 'string' && v.trim() ? v.replace(/\s+/g, ' ').trim().slice(0, 140) : undefined
 
 /** SGR + legacy mouse reports and focus in/out — terminal chatter, not typing */
 const MOUSE_OR_FOCUS = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[[IO]/g
@@ -49,6 +73,8 @@ function isKeyboardInput(data: string): boolean {
 interface StatuslinePayload {
   model?: { id?: string; display_name?: string }
   effort?: { level?: string }
+  /** custom (/rename) title, else the AI-generated one; absent until either exists */
+  session_name?: string
   rate_limits?: {
     five_hour?: { used_percentage?: number; resets_at?: number }
     seven_day?: { used_percentage?: number; resets_at?: number }
@@ -56,11 +82,16 @@ interface StatuslinePayload {
 }
 
 /** kinds of OS notification a session can request via the 'notify' event */
-export type NotifyKind = 'attention' | 'done' | 'rate-limited'
+export type NotifyKind = 'attention' | 'done' | 'rate-limited' | 'fallback'
+export interface NotifyEvent {
+  id: string
+  kind: NotifyKind
+  /** extra line for the notification body (last message, prompt, model pair) */
+  detail?: string
+}
 
-/** Emits 'notify' ({ id, kind }) so the main process can raise an OS notification. */
+/** Emits 'notify' (NotifyEvent) so the main process can raise an OS notification. */
 export class SessionManager extends EventEmitter {
-  readonly ptys = new PtyManager()
   readonly hooks: HookServer
   /** sessions awaiting a "continue" once their (re)started claude is ready */
   private pendingContinue = new Set<string>()
@@ -86,11 +117,25 @@ export class SessionManager extends EventEmitter {
   private shuttingDown = false
   /** ids of sessions that were active (had a live pty) at the previous quit */
   private restoredActiveIds: string[] = []
+  /** id → display name mirror of store.knownModels: the per-statusline check is
+   *  a Map lookup, and the store is only written for a new or renamed model */
+  private knownModels: Map<string, string> | null = null
+  /** when the user last pressed Esc in a session's terminal — an interrupt
+   *  notice right after it means the turn ended (no Stop hook fires for that) */
+  private escAt = new Map<string, number>()
+  /** statusline-vs-configured model mismatches waiting out FALLBACK_GRACE_MS */
+  private fallbackTimers = new Map<string, NodeJS.Timeout>()
+  /** the limit banner last acted on per session — the notice stays in the
+   *  conversation and repaints on scroll, which must not park the account again */
+  private lastBanner = new Map<string, string>()
+  /** sessions whose last Stop was held back by background agents still running */
+  private deferredStop = new Set<string>()
 
   constructor(
     private store: AppStore,
     private accounts: AccountManager,
-    private onChange: () => void
+    private onChange: () => void,
+    readonly ptys: PtyManager
   ) {
     super()
     this.hooks = new HookServer((sessionId) => {
@@ -101,7 +146,9 @@ export class SessionManager extends EventEmitter {
     this.hooks.on('event', (ev: HookEvent) => this.onHookEvent(ev))
     this.ptys.on('data', ({ id, data }: { id: string; data: string }) => this.scanOutput(id, data))
     this.ptys.on('exit', ({ id }: { id: string }) => {
-      if (this.shuttingDown) return // quitting: preserve state so restore knows what was active
+      // quitting: preserve state so restore knows what was active; login ptys aren't sessions
+      if (this.shuttingDown || !this.get(id)) return
+      this.clearFallbackTimer(id) // a mismatch seen by a process that just died is moot
       // a --resume that exits before SessionStart failed (e.g. transcript gone) → start fresh
       if (this.resuming.has(id)) return void this.resumeFailed(id)
       // an expected kill (switch/restart) clears state itself; unexpected → exited
@@ -135,6 +182,9 @@ export class SessionManager extends EventEmitter {
         addDirs: s.addDirs ?? [],
         addDirClaudeMd: s.addDirClaudeMd ?? false,
         settingsJson: s.settingsJson ?? '',
+        cliTitle: s.cliTitle ?? null,
+        stopOnFallback: s.stopOnFallback ?? false,
+        fallbackModel: null,
         poppedOut: false,
         state: 'exited' as const,
         ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
@@ -156,13 +206,14 @@ export class SessionManager extends EventEmitter {
   }
 
   async create(input: NewSessionInput): Promise<string> {
-    // blank account → auto-pick a logged-in one with the most headroom
-    const accountDir = input.accountDir || this.accounts.pickWithHeadroom()?.configDir
+    // blank account → the one that should be spent next for this model
+    const accountDir = input.accountDir || this.accounts.pickAccount({ model: input.modelId })?.configDir
     if (!accountDir) throw new Error('no logged-in account available')
     pushRecentLaunchArgs(this.store, input.launchArgs)
     const session: Session = {
       id: randomUUID(),
       title: input.title.trim() || null,
+      cliTitle: null,
       claudeSessionId: null,
       transcriptPath: null,
       cwd: input.cwd,
@@ -180,7 +231,9 @@ export class SessionManager extends EventEmitter {
       addDirs: input.addDirs,
       addDirClaudeMd: input.addDirClaudeMd,
       settingsJson: input.settingsJson,
-      draft: null
+      draft: null,
+      stopOnFallback: input.stopOnFallback,
+      fallbackModel: null
     }
     this.store.set('sessions', [...this.list(), session])
     await this.spawn(session, { resume: false })
@@ -202,6 +255,7 @@ export class SessionManager extends EventEmitter {
    */
   stop(id: string): void {
     this.clearResetTimer(id)
+    this.clearFallbackTimer(id)
     this.clearSends(id)
     this.pendingContinue.delete(id)
     this.pendingUltracode.delete(id)
@@ -223,6 +277,7 @@ export class SessionManager extends EventEmitter {
    */
   private async resumeFailed(id: string): Promise<void> {
     this.resuming.delete(id)
+    this.pendingContinue.delete(id) // a "continue" into a brand-new empty conversation is nonsense
     this.tail.delete(id)
     this.update(id, { claudeSessionId: null, transcriptPath: null })
     const session = this.get(id)
@@ -231,6 +286,10 @@ export class SessionManager extends EventEmitter {
 
   remove(id: string): void {
     this.clearResetTimer(id)
+    this.clearFallbackTimer(id)
+    this.escAt.delete(id)
+    this.lastBanner.delete(id)
+    this.deferredStop.delete(id)
     this.tail.delete(id)
     this.trusted.delete(id)
     this.bypassAccepted.delete(id)
@@ -264,6 +323,7 @@ export class SessionManager extends EventEmitter {
     if (patch.addDirs !== undefined) p.addDirs = patch.addDirs
     if (patch.addDirClaudeMd !== undefined) p.addDirClaudeMd = patch.addDirClaudeMd
     if (patch.settingsJson !== undefined) p.settingsJson = patch.settingsJson
+    if (patch.stopOnFallback !== undefined) p.stopOnFallback = patch.stopOnFallback
     // these are all launch flags — respawn a live (idle) session so the
     // change applies now; a running one keeps its turn and picks them up on the
     // next restart. Kill BEFORE writing the new values: the dying process's
@@ -275,6 +335,7 @@ export class SessionManager extends EventEmitter {
       this.ptys.isAlive(id) &&
       session.state !== 'running'
     if (respawn) {
+      this.resuming.delete(id) // our kill must not read as a failed --resume
       await this.ptys.killAndWait(id)
       this.tail.delete(id)
     }
@@ -306,6 +367,11 @@ export class SessionManager extends EventEmitter {
     if (!session || session.accountDir === targetDir) return
     if (session.state === 'running') throw new Error('cannot switch account while running')
 
+    // a switch during a still-booting --resume: our kill is not a failed resume
+    // (the exit handler would otherwise wipe the transcript info and respawn
+    // fresh on the OLD account, racing this switch)
+    this.resuming.delete(id)
+    this.clearFallbackTimer(id)
     await this.ptys.killAndWait(id)
     // the target account hasn't trusted this folder yet — reset so its own
     // "trust this folder" prompt gets auto-confirmed (trusted is per-session and
@@ -328,6 +394,7 @@ export class SessionManager extends EventEmitter {
     // a session stopped by its usage limit resumes work by default after any
     // switch — including a manual one from the account picker
     if (opts.continueAfter ?? session.state === 'rate-limited') this.pendingContinue.add(id)
+    else this.pendingContinue.delete(id) // a stale one from an earlier switch must not fire here
     if (canResume) this.resuming.add(id) // fall back to fresh if the resume still fails
     await this.spawn(this.get(id)!, { resume: canResume })
   }
@@ -337,7 +404,16 @@ export class SessionManager extends EventEmitter {
     // mouse/focus reports — those aren't the user re-engaging, so they must not
     // clear a done/needs-attention badge just because the user glanced at the card
     if (isKeyboardInput(data)) {
-      this.clearFinished(id)
+      const s = this.get(id)
+      if (data === '\x1b') this.escAt.set(id, Date.now())
+      // done → they're starting something new; needs-attention → an ANSWER
+      // (Enter, or a single key like y/1/2) means claude carries on — arrow/tab
+      // navigation inside the prompt doesn't, and Esc dismisses it (the
+      // interrupt notice, not this, decides)
+      if (s?.state === 'done') this.update(id, { state: 'idle' })
+      else if (s?.state === 'needs-attention' && (data.includes('\r') || /^[\x20-\x7e]$/.test(data))) {
+        this.update(id, { state: 'running' })
+      }
       // the user is typing in the terminal — abandon queued auto-submits and any
       // pending Enter retry, or a retry would fire their half-typed line (live-hit
       // on the interrupted-resume "What should Claude do instead?" prompt)
@@ -360,7 +436,11 @@ export class SessionManager extends EventEmitter {
    *  Goes through the send queue: instant when claude is up, held until the TUI
    *  is ready when a switch just respawned it. */
   async submit(id: string, text: string): Promise<void> {
-    await this.maybeSwitchBeforeSubmit(id)
+    try {
+      await this.maybeSwitchBeforeSubmit(id)
+    } catch (e) {
+      console.warn('[session] pre-submit account switch failed, sending anyway:', e) // the message must never be lost
+    }
     this.clearFinished(id)
     this.send(id, text)
   }
@@ -381,11 +461,16 @@ export class SessionManager extends EventEmitter {
     // must still reset now so a failed re-apply can't leave it lying.
     this.tail.delete(session.id)
     this.bypassAccepted.delete(session.id) // the new process shows the disclaimer afresh
+    this.trusted.delete(session.id) // …and may show a (new kind of) trust prompt afresh
+    this.lastBanner.delete(session.id) // banners aren't replayed by --resume; a new process starts clean
+    this.deferredStop.delete(session.id)
+    this.clearFallbackTimer(session.id)
     this.clearSends(session.id) // queued submits from a prior incarnation must not fire into this one
     if (session.effort === 'ultracode') {
       this.pendingUltracode.add(session.id)
       this.update(session.id, { effort: null })
     }
+    if (session.fallbackModel) this.update(session.id, { fallbackModel: null }) // --model puts the configured one back
     const settingsDir = join(app.getPath('userData'), 'session-settings')
     const settingsFile = writeSessionSettings(
       settingsDir,
@@ -426,11 +511,15 @@ export class SessionManager extends EventEmitter {
    *  switch first rather than burning the submit on a doomed account. */
   private async maybeSwitchBeforeSubmit(id: string): Promise<void> {
     const session = this.get(id)
-    if (!session || session.limitRule !== 'auto-switch') return
+    if (!session || session.limitRule !== 'auto-switch' || session.state === 'running') return
     const account = this.accounts.get(session.accountDir)
-    if (!account || this.accounts.worstUsedPct(account) < SWITCH_THRESHOLD) return
-    const target = this.accounts.pickWithHeadroom(session.accountDir)
-    if (target) await this.switchAccount(id, target.configDir, { continueAfter: false })
+    const model = session.modelId ?? session.model
+    if (!account || this.accounts.usedPct(account, modelFamily(model)) < HEADROOM_PCT) return
+    const target = this.accounts.pickAccount({ exclude: session.accountDir, model })
+    // no ping-pong between two nearly-spent accounts on every message
+    if (target && this.accounts.usedPct(target, modelFamily(model)) < HEADROOM_PCT) {
+      await this.switchAccount(id, target.configDir, { continueAfter: false })
+    }
   }
 
   /** sessions whose trust prompt we've already auto-confirmed */
@@ -491,24 +580,42 @@ export class SessionManager extends EventEmitter {
     // respawn restores it (the statusline payload doesn't carry it)
     const mode = detectPermissionMode(buf)
     if (mode && mode !== session.mode) this.update(id, { mode })
-    if (session.state !== 'rate-limited' && detectRateLimit(buf)) void this.handleRateLimit(id)
+    // Esc just pressed + the interrupt notice painted = the turn is over (no
+    // Stop hook for interrupts). Checked on the new chunk only: the notice
+    // lives on in the conversation and repaints on scroll.
+    const esc = this.escAt.get(id)
+    if (esc && Date.now() - esc < 3000 && isInterruptNotice(data)) {
+      this.escAt.delete(id)
+      if (session.state === 'running' || session.state === 'needs-attention') this.update(id, { state: 'idle' })
+    }
+    // the CLI wants this session to sign in: credentials died under a
+    // "logged in" account — flag the account and hand the session to the user
+    if (isLoginPrompt(data) && this.accounts.get(session.accountDir)?.loginStatus === 'logged_in') {
+      this.accounts.markExpired(session.accountDir)
+      this.attention(id, 'login')
+    }
+    const limit = detectRateLimit(buf)
+    if (limit && session.state !== 'rate-limited' && this.lastBanner.get(id) !== limit.banner) {
+      this.lastBanner.set(id, limit.banner)
+      void this.handleRateLimit(id, limit.window)
+    }
   }
 
   /** React to a session hitting its usage limit per its configured rule. */
-  private async handleRateLimit(id: string): Promise<void> {
+  private async handleRateLimit(id: string, window: string): Promise<void> {
     const session = this.get(id)
     if (!session) return
     this.setState(id, 'rate-limited')
     // the banner is ground truth — keep this account out of the rotation until
-    // its window resets (and probe its real numbers in the background)
-    this.accounts.markRateLimited(session.accountDir)
+    // that window resets (and probe its real numbers in the background)
+    this.accounts.markRateLimited(session.accountDir, window)
 
     switch (session.limitRule) {
       case 'manual':
         this.emit('notify', { id, kind: 'rate-limited' })
         break
       case 'auto-switch': {
-        const target = this.accounts.pickWithHeadroom(session.accountDir)
+        const target = this.accounts.pickAccount({ exclude: session.accountDir, model: session.modelId ?? session.model })
         if (target) await this.switchAccount(id, target.configDir, { continueAfter: true })
         else this.emit('notify', { id, kind: 'rate-limited' }) // nowhere to go
         break
@@ -531,8 +638,13 @@ export class SessionManager extends EventEmitter {
       id,
       setTimeout(() => {
         this.clearResetTimer(id)
-        this.pendingContinue.add(id)
-        void this.restart(id)
+        // a banner doesn't end the process — claude sits at its prompt, so a
+        // restart() would no-op (live-hit: wait-and-continue never continued)
+        if (this.ptys.isAlive(id)) this.send(id, 'continue')
+        else {
+          this.pendingContinue.add(id)
+          void this.restart(id)
+        }
       }, delay)
     )
   }
@@ -560,24 +672,67 @@ export class SessionManager extends EventEmitter {
         if (this.pendingContinue.delete(sessionId)) this.send(sessionId, 'continue')
         break
       case 'UserPromptSubmit':
+        this.deferredStop.delete(sessionId)
         this.setState(sessionId, 'running')
         break
-      case 'Stop':
+      case 'Stop': {
         // Stop fires at every turn boundary, including the wake-ups background
-        // tasks/agents trigger when they finish. The payload lists still-running
-        // backgrounded work — the SESSION is only done once none remains.
-        if ((payload['background_tasks'] as unknown[] | undefined)?.length) break
+        // agents trigger when they finish. The payload lists in-flight background
+        // work — the SESSION is only done once nothing that will wake it remains.
+        const tasks = (payload['background_tasks'] as { type?: string; task_type?: string }[] | undefined) ?? []
+        if (tasks.some((t) => WAKING_TASK_TYPES.has(t.type ?? t.task_type ?? ''))) {
+          this.deferredStop.add(sessionId)
+          break
+        }
+        this.deferredStop.delete(sessionId)
         // a limit banner also ends the turn — don't repaint rate-limited as done
         if (session.state === 'rate-limited') break
         if (session.state !== 'done') {
           this.update(sessionId, { state: 'done' })
-          this.emit('notify', { id: sessionId, kind: 'done' })
+          this.emit('notify', { id: sessionId, kind: 'done', detail: snippet(payload['last_assistant_message']) })
+        }
+        // per-model (Fable) numbers only come from the panel probe — keep them
+        // fresh for the accounts actually being spent
+        this.accounts.refreshUsageIfStale(session.accountDir, 5 * 60_000)
+        break
+      }
+      case 'Notification': {
+        const type = String(payload['notification_type'] ?? '')
+        if (!type || ATTENTION_NOTIFICATIONS.has(type)) this.attention(sessionId, snippet(payload['message']))
+        else if (type === 'push_notification') this.emit('notify', { id: sessionId, kind: 'attention', detail: snippet(payload['message']) })
+        // "Claude is waiting for your input" while we still think it's working
+        // and no background agent is pending: the turn ended without a Stop (an
+        // interrupt) — it's idle. With agents pending, running is the truth.
+        else if (type === 'idle_prompt' && session.state === 'running' && !this.deferredStop.has(sessionId)) {
+          this.setState(sessionId, 'idle')
         }
         break
-      case 'Notification':
-        this.setState(sessionId, 'needs-attention')
-        this.emit('notify', { id: sessionId, kind: 'attention' })
+      }
+      case 'PreToolUse': // AskUserQuestion / ExitPlanMode: a dialog is up, waiting
+        this.attention(sessionId, String(payload['tool_name'] ?? ''))
         break
+      case 'PostToolUse': // …and answered
+        if (session.state === 'needs-attention') this.setState(sessionId, 'running')
+        break
+      case 'PostModelSwitch': {
+        const to = String(payload['to_model'] ?? '')
+        if (!to) break
+        this.clearFallbackTimer(sessionId)
+        // automatic: a fallback — or the CLI putting the requested model back
+        // (retry/revert), which is the fallback ending, not a new one
+        if (payload['source'] === 'auto') {
+          if (session.modelId && sameModel(to, session.modelId)) this.update(sessionId, { fallbackModel: null })
+          else this.onFallback(sessionId, to)
+        }
+        // a resume restores whatever the transcript last ran on — possibly a
+        // sticky fallback; the flag we passed is still the configured model
+        else if (payload['source'] === 'resume') {
+          if (session.modelId && !sameModel(to, session.modelId)) this.update(sessionId, { fallbackModel: to })
+        }
+        // a deliberate /model (or picker): that IS the session's model now
+        else this.update(sessionId, { modelId: to, fallbackModel: null })
+        break
+      }
       case 'statusline':
         this.onStatusline(session, payload as StatuslinePayload)
         break
@@ -588,13 +743,44 @@ export class SessionManager extends EventEmitter {
     // a killed process's in-flight statusline POST can land after a respawn
     // began — it must not overwrite freshly-configured model/effort values
     if (!this.ptys.isAlive(session.id)) return
+    const liveId = p.model?.id
+    if (liveId) this.recordModel(liveId, p.model?.display_name ?? liveId)
     const model = p.model?.display_name ?? session.model
-    const modelId = p.model?.id ?? session.modelId
+    // the configured model is adopted from the first statusline only ("default"
+    // becomes concrete so respawns pin it); after that a different live model
+    // is either a user /model (PostModelSwitch says so) or a fallback (below)
+    const modelId = session.modelId ?? liveId ?? null
     // ultracode reports as plain xhigh here (scanOutput sets/clears the label)
     const level = p.effort?.level ?? session.effort
     const effort = session.effort === 'ultracode' && level === 'xhigh' ? 'ultracode' : level
-    if (model !== session.model || effort !== session.effort || modelId !== session.modelId) {
-      this.update(session.id, { model, effort, modelId })
+    // claude's own title: absent until its AI summary lands (a few seconds
+    // after the first prompt) and absent again once /clear starts a new
+    // conversation — mirror it as-is rather than keeping a stale one
+    const cliTitle = p.session_name ?? null
+    if (
+      model !== session.model ||
+      effort !== session.effort ||
+      modelId !== session.modelId ||
+      cliTitle !== session.cliTitle
+    ) {
+      this.update(session.id, { model, effort, modelId, cliTitle })
+    }
+    // live model ≠ configured model: give a user-initiated PostModelSwitch a
+    // moment to claim it, else it's the CLI falling back on its own
+    if (liveId && modelId && !sameModel(liveId, modelId)) {
+      if (!session.fallbackModel && !this.fallbackTimers.has(session.id)) {
+        this.fallbackTimers.set(
+          session.id,
+          setTimeout(() => {
+            this.fallbackTimers.delete(session.id)
+            const s = this.get(session.id)
+            if (s?.modelId && !sameModel(liveId, s.modelId) && this.ptys.isAlive(session.id)) this.onFallback(session.id, liveId)
+          }, FALLBACK_GRACE_MS)
+        )
+      }
+    } else if (session.fallbackModel && liveId) {
+      this.clearFallbackTimer(session.id)
+      this.update(session.id, { fallbackModel: null }) // back on the configured model
     }
     // both windows are optional in the payload — patch only what's present, so
     // a five_hour-only event can't wipe the weekly numbers (or vice versa)
@@ -701,6 +887,47 @@ export class SessionManager extends EventEmitter {
 
   private setState(id: string, state: SessionState): void {
     if (this.get(id)?.state !== state) this.update(id, { state })
+  }
+
+  /** The TUI is waiting on the user. One notification per wait: a PreToolUse
+   *  dialog and its permission_prompt Notification would otherwise both fire. */
+  private attention(id: string, detail?: string): void {
+    if (this.get(id)?.state === 'needs-attention') return
+    this.update(id, { state: 'needs-attention' })
+    this.emit('notify', { id, kind: 'attention', detail })
+  }
+
+  /** The CLI swapped the session onto another model by itself (safeguards
+   *  refusal, overload…). Remember it for the card; when the session opted in,
+   *  interrupt the turn now running on the stand-in and hand it to the user. */
+  private onFallback(id: string, toModel: string): void {
+    const session = this.get(id)
+    if (!session || session.fallbackModel === toModel) return
+    this.update(id, { fallbackModel: toModel })
+    if (!session.stopOnFallback) return
+    this.abandonSends(id)
+    if (session.state === 'running') this.ptys.write(id, '\x1b') // Esc: stop the fallback model mid-turn
+    this.update(id, { state: 'needs-attention' })
+    this.emit('notify', { id, kind: 'fallback', detail: `${session.modelId ?? session.model ?? '?'} → ${toModel}` })
+  }
+
+  private clearFallbackTimer(id: string): void {
+    const t = this.fallbackTimers.get(id)
+    if (t) clearTimeout(t)
+    this.fallbackTimers.delete(id)
+  }
+
+  /** Remember a model the CLI reported — the picker lists these after its
+   *  presets, so a new release is selectable without an app update. */
+  private recordModel(id: string, name: string): void {
+    this.knownModels ??= new Map((this.store.get('knownModels') ?? []).map((m) => [m.id, m.name]))
+    if (this.knownModels.get(id) === name) return
+    this.knownModels.set(id, name)
+    this.store.set(
+      'knownModels',
+      [...this.knownModels].map(([id, name]) => ({ id, name }))
+    )
+    this.onChange()
   }
 
   private update(id: string, patch: Partial<Session>): void {

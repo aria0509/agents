@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { useApp, sortedSessions } from '@/stores/app'
 import { SessionGrid } from '@/components/session-grid'
 import { SessionSidebar } from '@/components/session-sidebar'
+import { StateFilter } from '@/components/state-filter'
 import { NewSessionDialog } from '@/components/new-session-dialog'
 import { SettingsDialog } from '@/components/settings-dialog'
 
@@ -14,6 +15,7 @@ function App() {
   const setFocused = useApp((s) => s.setFocused)
   const groupFilter = useApp((s) => s.groupFilter)
   const setGroupFilter = useApp((s) => s.setGroupFilter)
+  const stateFilter = useApp((s) => s.stateFilter)
   const [newOpen, setNewOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
@@ -31,7 +33,11 @@ function App() {
     if (groupFilter && !sessions.some((s) => s.cwd === groupFilter)) setGroupFilter(null)
   }, [sessions, groupFilter, setGroupFilter])
 
-  const visible = groupFilter ? sessions.filter((s) => s.cwd === groupFilter) : sessions
+  // folder filter (sidebar) first, then the state chips over what's left. A state
+  // filter stays put when its count drops to zero (states change under the user
+  // constantly) — the empty grid says so instead
+  const inFolder = groupFilter ? sessions.filter((s) => s.cwd === groupFilter) : sessions
+  const visible = stateFilter ? inFolder.filter((s) => s.state === stateFilter) : inFolder
 
   return (
     <div className="flex h-screen flex-col">
@@ -59,7 +65,14 @@ function App() {
               </Button>
             </div>
           ) : (
-            <SessionGrid sessions={sortedSessions(visible)} />
+            <>
+              <StateFilter sessions={inFolder} />
+              {visible.length === 0 ? (
+                <p className="text-muted-foreground text-sm">{t('sessions.noMatch')}</p>
+              ) : (
+                <SessionGrid sessions={sortedSessions(visible)} />
+              )}
+            </>
           )}
         </main>
       </div>

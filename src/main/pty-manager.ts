@@ -61,6 +61,7 @@ export class PtyManager extends EventEmitter {
     this.entries.set(id, entry)
 
     proc.onData((data) => {
+      if (this.entries.get(id) !== entry) return // superseded under the same id (login restarted) — its tail is noise now
       if (XTVERSION_QUERY.test(data)) proc.write(XTVERSION_REPLY)
       entry.chunks.push(data)
       entry.buffered += data.length
@@ -74,9 +75,14 @@ export class PtyManager extends EventEmitter {
       else if (!entry.flushTimer) entry.flushTimer = setTimeout(() => this.flush(id, entry), FLUSH_MS)
     })
     proc.onExit(({ exitCode }) => {
+      // a process replaced under the same id before it died (a login restarted
+      // while the old one was still winding down) must not tear down its
+      // successor's entry or announce an exit on its behalf
+      if (this.entries.get(id) !== entry) return
       this.flush(id, entry) // trailing output must land before the exit event
       this.entries.delete(id)
-      this.emit('exit', { id, exitCode })
+      // the last screenful travels with the event — the entry is gone by now
+      this.emit('exit', { id, exitCode, tail: entry.chunks.join('').slice(-4000) })
     })
   }
 
@@ -137,8 +143,8 @@ export class PtyManager extends EventEmitter {
     return { data: e.chunks.join(''), end: e.end }
   }
 
-  kill(id: string): void {
-    this.entries.get(id)?.proc.kill()
+  kill(id: string, signal?: string): void {
+    this.entries.get(id)?.proc.kill(signal)
   }
 
   /** Session removed for good — drop its stream offset too. */

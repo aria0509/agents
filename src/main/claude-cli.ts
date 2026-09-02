@@ -9,6 +9,7 @@ import {
   writeFileSync,
   mkdirSync,
   copyFileSync,
+  cpSync,
   existsSync,
   readFileSync,
   readdirSync,
@@ -173,7 +174,15 @@ export async function authStatus(configDir: string, retry = 1): Promise<AuthStat
   const env = await envFor(configDir)
   const bin = await claudePath()
   try {
-    const { stdout } = await execFileP(bin, ['auth', 'status', '--json'], { env, timeout: 30_000 })
+    // logged out = exit code 1 WITH the JSON still on stdout (2.1.258) — that's
+    // an answer, not an error; only a missing JSON block is
+    const stdout = await execFileP(bin, ['auth', 'status', '--json'], { env, timeout: 30_000 }).then(
+      (r) => r.stdout,
+      (e: { stdout?: string }) => {
+        if (typeof e.stdout === 'string' && e.stdout.includes('{')) return e.stdout
+        throw e
+      }
+    )
     // tolerate update notices etc. around the JSON block
     const json = JSON.parse(stdout.slice(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1))
     return {
@@ -187,6 +196,17 @@ export async function authStatus(configDir: string, retry = 1): Promise<AuthStat
   }
 }
 
+/** `claude update` — self-update the CLI (run once per app launch). Best-effort:
+ *  offline, or an npm-managed install that can't self-update, just logs. */
+export async function updateClaudeCli(): Promise<void> {
+  try {
+    const { stdout } = await execFileP(await claudePath(), ['update'], { env: await loginShellEnv(), timeout: 180_000 })
+    console.log('[claude-cli] update:', stdout.trim().split('\n').at(-1))
+  } catch (err) {
+    console.warn('[claude-cli] update failed:', err)
+  }
+}
+
 /** Log an account out (`claude auth logout`) for a given config dir. */
 export async function claudeLogout(configDir: string): Promise<void> {
   await execFileP(await claudePath(), ['auth', 'logout'], { env: await envFor(configDir), timeout: 30_000 })
@@ -197,6 +217,9 @@ export async function claudeLogout(configDir: string): Promise<void> {
  * local hook server. NEVER write into <configDir>/settings.json — profiles may
  * symlink-share it (claude-switch convention).
  */
+/** tools whose call IS a dialog waiting on the user (hook matcher syntax) */
+const DIALOG_TOOLS = 'AskUserQuestion|ExitPlanMode'
+
 export function writeSessionSettings(
   dir: string,
   sessionId: string,
@@ -220,7 +243,13 @@ export function writeSessionSettings(
       SessionStart: hook('SessionStart'),
       UserPromptSubmit: hook('UserPromptSubmit'),
       Stop: hook('Stop'),
-      Notification: hook('Notification')
+      Notification: hook('Notification'),
+      // the model changed under the session: a user /model, or an automatic
+      // fallback (safeguards refusal / overload) that stopOnFallback reacts to
+      PostModelSwitch: hook('PostModelSwitch'),
+      // dialogs that wait on the user without raising a Notification event
+      PreToolUse: [{ matcher: DIALOG_TOOLS, ...hook('PreToolUse')[0] }],
+      PostToolUse: [{ matcher: DIALOG_TOOLS, ...hook('PostToolUse')[0] }]
     }
   }
   mkdirSync(dir, { recursive: true })
@@ -242,12 +271,19 @@ export function moveTranscript(transcriptPath: string, fromDir: string, toDir: s
   const rel = abs.slice(base.length + 1) // projects/<enc>/<sid>.jsonl
   const target = join(resolve(toDir), rel)
   mkdirSync(dirname(target), { recursive: true })
-  if (!existsSync(abs)) return target // nothing written yet; resume will recreate
-  try {
-    renameSync(abs, target)
-  } catch {
-    copyFileSync(abs, target) // cross-device fallback
-    rmSync(abs, { force: true })
+  // the jsonl plus its sidecar dir (<sid>/tool-results, subagent transcripts)
+  const sidecar = (p: string): string => p.replace(/\.jsonl$/, '')
+  for (const [from, to] of [
+    [abs, target],
+    [sidecar(abs), sidecar(target)]
+  ]) {
+    if (!existsSync(from)) continue // nothing written yet; resume will recreate
+    try {
+      renameSync(from, to)
+    } catch {
+      cpSync(from, to, { recursive: true }) // cross-device fallback
+      rmSync(from, { recursive: true, force: true })
+    }
   }
   return target
 }
@@ -257,7 +293,7 @@ export function moveTranscript(transcriptPath: string, fromDir: string, toDir: s
  * words with cursor-move codes rather than literal spaces, so patterns below use
  * `\s*` (zero-or-more) between words to tolerate the collapsed result.
  */
-function stripAnsi(text: string): string {
+export function stripAnsi(text: string): string {
   return text
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
     .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '') // OSC (titles, hyperlinks)
@@ -272,13 +308,26 @@ function stripAnsi(text: string): string {
  * normal lane) and must NOT match. Older wordings kept for older CLIs. Wording
  * lives here so a CLI change is a one-line fix.
  */
-export function detectRateLimit(text: string): boolean {
+export function detectRateLimit(text: string): { window: string; banner: string } | null {
   const s = stripAnsi(text)
-  return (
-    /You.?ve\s*(?:hit|reached)\s*your\s*(?!\s*fast)[\w .$'-]{2,30}?limit|You.?re\s*out\s*of\s*(?:usage\s*credits|extra\s*usage)|Your\s*org\s*is\s*out\s*of\s*usage/i.test(
-      s
-    ) || /usage\s*limit\s*reached|5-hour\s*limit\s*reached|weekly\s*limit\s*reached|Claude\s*usage\s*limit/i.test(s)
-  )
+  const m =
+    /You.?ve\s*(?:hit|reached)\s*your\s*(?!\s*fast)([\w .$'-]{2,30}?)\s*limit[^\n]{0,60}/i.exec(s) ??
+    /(You.?re\s*out\s*of\s*(?:usage\s*credits|extra\s*usage)|Your\s*org\s*is\s*out\s*of\s*usage)[^\n]{0,60}/i.exec(s) ??
+    /(usage\s*limit\s*reached|5-hour\s*limit\s*reached|weekly\s*limit\s*reached|Claude\s*usage\s*limit)[^\n]{0,60}/i.exec(s)
+  if (!m) return null
+  // window: "session" | "weekly" | "opus" | "fable 5" | "usage credit" … (what
+  // markRateLimited parks against); banner: the whole line, so a repaint of the
+  // same notice (scrolling) is told apart from a new one (new reset time)
+  return { window: m[1].replace(/\s+/g, ' ').trim().toLowerCase(), banner: m[0].replace(/\s+/g, ' ').trim() }
+}
+
+/**
+ * The CLI asking a running SESSION to sign in — its credentials went bad while
+ * `claude auth status` still reads them as fine (it only reflects local
+ * storage). Same wording as `claude auth login`; chrome, never in a replay.
+ */
+export function isLoginPrompt(text: string): boolean {
+  return /Paste\s*code\s*here\s*if\s*prompted|Opening\s*browser\s*to\s*sign\s*in|Select\s*login\s*method/i.test(stripAnsi(text))
 }
 
 /**
@@ -290,7 +339,10 @@ export function detectRateLimit(text: string): boolean {
  * LONGER the Enter default (see preselectsExit): a bare Enter now quits claude.
  */
 export function isTrustPrompt(text: string): boolean {
-  return /trust\s*this\s*folder|Security\s*guide|safety\s*check|created\s*or\s*one\s*you\s*trust|Do\s*you\s*trust/i.test(
+  // 2.1.258 also gates project settings that carry commands behind "Managed
+  // settings require approval" (Yes, I trust these settings / No, exit) — same
+  // shape, same handling
+  return /trust\s*this\s*folder|Security\s*guide|safety\s*check|created\s*or\s*one\s*you\s*trust|Do\s*you\s*trust|Managed\s*settings\s*require\s*approval/i.test(
     stripAnsi(text)
   )
 }
@@ -306,7 +358,22 @@ export function isTrustPrompt(text: string): boolean {
  * accepts (theme picker, "Press Enter to continue", non-exiting trust variants).
  */
 export function preselectsExit(text: string): boolean {
-  return /No,\s*exit/i.test(stripAnsi(text))
+  const s = stripAnsi(text)
+  // the highlighted option carries the ❯ marker — trust that over wording when
+  // it's rendered ("No, continue without these permissions" also declines)
+  if (/❯\s*(?:\d+\.\s*)?No,/i.test(s)) return true
+  if (/❯\s*(?:\d+\.\s*)?Yes,/i.test(s)) return false
+  return /No,\s*(?:exit|continue)/i.test(s)
+}
+
+/**
+ * The notice claude paints after an Esc interrupt ("Interrupted · What should
+ * Claude do instead?"). No Stop hook fires for an interrupt, so this is the
+ * only sign the turn ended. Conversation text repaints on scroll — callers
+ * must pair it with a just-pressed Esc rather than trust it on its own.
+ */
+export function isInterruptNotice(text: string): boolean {
+  return /Interrupted\s*·?\s*What\s*should\s*Claude\s*do\s*instead/i.test(stripAnsi(text))
 }
 
 /**
@@ -386,9 +453,12 @@ export function detectUltracode(text: string): boolean | null {
  * out of that escape so we get one clean copy (the visible text repeats it).
  */
 export function extractLoginUrl(text: string): string | null {
-  const osc = text.match(/\x1b\]8;;(https?:\/\/[^\x07\x1b]+)/)
+  // the link is ~1KB (pty reads chunk at 1KB): insist on the hyperlink's
+  // terminator so a chunk split mid-URL can't hand out a truncated link whose
+  // PKCE state would never match the waiting process
+  const osc = text.match(/\x1b\]8;;(https?:\/\/[^\x07\x1b]+)(?:\x07|\x1b\\)/)
   if (osc) return osc[1]
-  const plain = text.match(/https?:\/\/[^\s'"\x1b\x07]+/)
+  const plain = text.match(/https?:\/\/[^\s'"\x1b\x07]+(?=\s)/)
   return plain ? plain[0] : null
 }
 

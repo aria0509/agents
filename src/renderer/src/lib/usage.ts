@@ -32,10 +32,16 @@ export function resetIn(resetsAt: number | null): string | null {
  *   weekly   X% · Fable Z% · reset W
  */
 export function usageLines(u: AccountUsage, L: { current: string; weekly: string; reset: string }): string[] {
+  const now = Date.now()
+  // same reading as the main process's usedPct: a window whose reset has
+  // passed is free again (its number is stale — the statusline stops carrying
+  // it), and a banner park counts as full until it lapses
+  const live = (v: number | null, resetsAt: number | null): number | null => (resetsAt != null && resetsAt <= now ? 0 : v)
   const withReset = (r: number | null): string => (resetIn(r) ? ` · ${L.reset} ${resetIn(r)}` : '')
-  const current = `${L.current} ${pct(u.fiveHour)}${withReset(u.resetsAt)}`
+  const parked = u.limitedUntil != null && u.limitedUntil > now ? ` · ⛔ ${resetIn(u.limitedUntil)}` : ''
+  const current = `${L.current} ${pct(live(u.fiveHour, u.resetsAt))}${withReset(u.resetsAt)}${parked}`
   // weeklyModels can be absent (statusline-sourced usage, or older persisted data)
-  const models = (u.weeklyModels ?? []).map((m) => ` · ${m.name} ${m.percent}%`).join('')
-  const weekly = `${L.weekly} ${pct(u.weekly)}${models}${withReset(u.weeklyResetsAt)}`
+  const models = (u.weeklyModels ?? []).map((m) => ` · ${m.name} ${pct(live(m.percent, m.resetsAt ?? u.weeklyResetsAt))}`).join('')
+  const weekly = `${L.weekly} ${pct(live(u.weekly, u.weeklyResetsAt))}${models}${withReset(u.weeklyResetsAt)}`
   return [current, weekly]
 }
