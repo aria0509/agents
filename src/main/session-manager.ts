@@ -213,7 +213,6 @@ export class SessionManager extends EventEmitter {
         addDirClaudeMd: s.addDirClaudeMd ?? false,
         settingsJson: s.settingsJson ?? '',
         cliTitle: s.cliTitle ?? null,
-        autoTitle: s.autoTitle ?? s.cliTitle ?? null,
         stopOnFallback: s.stopOnFallback ?? false,
         fallbackModel: null,
         poppedOut: false,
@@ -245,7 +244,6 @@ export class SessionManager extends EventEmitter {
       id: randomUUID(),
       title: input.title.trim() || null,
       cliTitle: null,
-      autoTitle: null,
       claudeSessionId: null,
       transcriptPath: null,
       cwd: input.cwd,
@@ -736,26 +734,19 @@ export class SessionManager extends EventEmitter {
         this.resuming.delete(sessionId) // resume (or fresh start) succeeded
         this.update(sessionId, {
           claudeSessionId: (payload['session_id'] as string) ?? session.claudeSessionId,
-          transcriptPath: (payload['transcript_path'] as string) ?? session.transcriptPath
+          transcriptPath: (payload['transcript_path'] as string) ?? session.transcriptPath,
+          // /clear starts a new conversation under a new id: the titles (the
+          // user's and claude's) described the old one — drop them
+          ...(payload['source'] === 'clear' && { title: null, cliTitle: null })
         })
         // restore ultracode before any queued "continue" runs a turn on it
         if (this.pendingUltracode.delete(sessionId)) this.send(sessionId, '/effort ultracode')
         if (this.pendingContinue.delete(sessionId)) this.send(sessionId, 'continue')
         break
-      case 'UserPromptSubmit': {
+      case 'UserPromptSubmit':
         this.deferredStop.delete(sessionId)
-        // a new request retitles an untitled card right away (claude's own
-        // summary only ever describes a conversation's FIRST prompt); wake-ups
-        // (task notifications, loops), slash commands and our own "continue" don't
-        const source = payload['source']
-        const prompt = typeof payload['prompt'] === 'string' ? payload['prompt'].trim() : ''
-        if ((source === undefined || source === 'user' || source === 'sdk') && prompt && !prompt.startsWith('/') && prompt !== 'continue') {
-          const line = prompt.split('\n')[0].replace(/\s+/g, ' ').trim()
-          this.update(sessionId, { autoTitle: line.length > 40 ? `${line.slice(0, 40)}…` : line })
-        }
         this.setState(sessionId, 'running')
         break
-      }
       case 'Stop': {
         // Stop fires at every turn boundary, including the wake-ups background
         // agents trigger when they finish. The payload lists in-flight background
@@ -849,8 +840,7 @@ export class SessionManager extends EventEmitter {
       modelId !== session.modelId ||
       cliTitle !== session.cliTitle
     ) {
-      // a (re)generated CLI title beats the request line; /clear (title gone) blanks it
-      this.update(session.id, { model, effort, modelId, cliTitle, ...(cliTitle !== session.cliTitle && { autoTitle: cliTitle }) })
+      this.update(session.id, { model, effort, modelId, cliTitle })
     }
     // a "default" launch runs whatever the first statusline says it runs
     if (liveId && !this.launchedModel.get(session.id)) this.launchedModel.set(session.id, liveId)
