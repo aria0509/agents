@@ -22,10 +22,13 @@ export function SessionCard({ session }: { session: SessionView }) {
   const setFocused = useApp((s) => s.setFocused)
   const cardSize = useApp((s) => s.cardSize)
   const dragOver = useApp((s) => s.dragOverId === session.id)
+  const flashing = useApp((s) => s.flashId === session.id)
   const account = accounts.find((a) => a.configDir === session.accountDir)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   const active = focusedId === session.id && session.alive && !session.poppedOut
+  // the chat input also serves an exited card: a submit resumes the session and delivers
+  const inputOpen = focusedId === session.id && !session.poppedOut
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: session.id })
 
   const usage = account && hasUsage(account.usage)
@@ -54,9 +57,11 @@ export function SessionCard({ session }: { session: SessionView }) {
           'group bg-card relative flex flex-col overflow-hidden rounded-lg border transition-colors',
           dragOver
             ? 'border-primary ring-primary ring-2'
-            : active
-              ? 'border-ring ring-ring/30 ring-2'
-              : 'hover:border-ring/40'
+            : flashing
+              ? 'border-amber-400 ring-4 ring-amber-400/70' // jumped to from a notification
+              : active
+                ? 'border-ring ring-ring/30 ring-2'
+                : 'hover:border-ring/40'
         )}
         style={{ height: cardSize }}
       >
@@ -144,7 +149,7 @@ export function SessionCard({ session }: { session: SessionView }) {
 
       {/* chat input floats below the card, outside it; rings while dragging a file
           over the card so it's clear the dropped path lands here */}
-      {active && (
+      {inputOpen && (
         <div className={cn('absolute inset-x-0 top-full z-30 mt-2 rounded-lg', dragOver && 'ring-primary ring-2')}>
           <ChatInput sessionId={session.id} autoFocus />
         </div>

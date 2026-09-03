@@ -19,13 +19,14 @@ import {
   isInterruptNotice,
   isLoginPrompt,
   isTrustPrompt,
-  isTuiReady,
   linkSessionRegistry,
   moveTranscript,
   parseSettingsOverrides,
   preselectsExit,
   readSystemPrompt,
   sessionArgs,
+  stripAnsi,
+  tuiInputState,
   writeSessionSettings
 } from './claude-cli'
 
@@ -101,6 +102,10 @@ export class SessionManager extends EventEmitter {
   /** sessions whose TUI has rendered its input box since the last spawn — the
    *  gate for delivering queued submissions (see send()) */
   private tuiReady = new Set<string>()
+  /** sessions whose screen is currently a picker/panel/dialog (/model, /usage,
+   *  a permission prompt…) — pasting there goes nowhere, and an Enter could
+   *  pick something in a menu */
+  private modal = new Set<string>()
   /** submissions queued per session until the TUI is ready; drained FIFO with
    *  an ack step between items */
   private sendQueue = new Map<string, string[]>()
@@ -128,6 +133,14 @@ export class SessionManager extends EventEmitter {
   /** the limit banner last acted on per session — the notice stays in the
    *  conversation and repaints on scroll, which must not park the account again */
   private lastBanner = new Map<string, string>()
+  /** the model each live process is known to run: what it was launched with,
+   *  the first statusline of a "default" launch, or a user /model — the
+   *  yardstick for fallback detection (NOT the persisted modelId, which the
+   *  settings form may change ahead of the next restart) */
+  private launchedModel = new Map<string, string | null>()
+  /** why a session is in needs-attention: a dialog awaiting a key, or paused
+   *  by us (fallback stop / login prompt) with nothing waiting for input */
+  private attentionKind = new Map<string, 'dialog' | 'paused'>()
   /** sessions whose last Stop was held back by background agents still running */
   private deferredStop = new Set<string>()
 
@@ -145,10 +158,12 @@ export class SessionManager extends EventEmitter {
     })
     this.hooks.on('event', (ev: HookEvent) => this.onHookEvent(ev))
     this.ptys.on('data', ({ id, data }: { id: string; data: string }) => this.scanOutput(id, data))
-    this.ptys.on('exit', ({ id }: { id: string }) => {
+    this.ptys.on('exit', ({ id, exitCode, tail }: { id: string; exitCode: number; tail: string }) => {
       // quitting: preserve state so restore knows what was active; login ptys aren't sessions
       if (this.shuttingDown || !this.get(id)) return
+      console.warn(`[session] ${id} claude exited (code ${exitCode}): ${stripAnsi(tail).replace(/\s+/g, ' ').trim().slice(-200)}`)
       this.clearFallbackTimer(id) // a mismatch seen by a process that just died is moot
+      this.launchedModel.delete(id)
       // a --resume that exits before SessionStart failed (e.g. transcript gone) → start fresh
       if (this.resuming.has(id)) return void this.resumeFailed(id)
       // an expected kill (switch/restart) clears state itself; unexpected → exited
@@ -183,6 +198,7 @@ export class SessionManager extends EventEmitter {
         addDirClaudeMd: s.addDirClaudeMd ?? false,
         settingsJson: s.settingsJson ?? '',
         cliTitle: s.cliTitle ?? null,
+        autoTitle: s.autoTitle ?? s.cliTitle ?? null,
         stopOnFallback: s.stopOnFallback ?? false,
         fallbackModel: null,
         poppedOut: false,
@@ -214,6 +230,7 @@ export class SessionManager extends EventEmitter {
       id: randomUUID(),
       title: input.title.trim() || null,
       cliTitle: null,
+      autoTitle: null,
       claudeSessionId: null,
       transcriptPath: null,
       cwd: input.cwd,
@@ -244,8 +261,13 @@ export class SessionManager extends EventEmitter {
   async restart(id: string): Promise<void> {
     const session = this.get(id)
     if (!session || this.ptys.isAlive(id)) return
-    if (session.claudeSessionId) this.resuming.add(id) // watch for a failed resume
-    await this.spawn(session, { resume: true })
+    // a session stopped before its first exchange has an id but no transcript:
+    // `--resume` would only die and respawn fresh (dropping anything queued
+    // for it meanwhile) — start fresh directly, as switchAccount does
+    const canResume = !!session.claudeSessionId && !!session.transcriptPath && existsSync(session.transcriptPath)
+    if (!canResume && session.claudeSessionId) this.update(id, { claudeSessionId: null, transcriptPath: null })
+    if (canResume) this.resuming.add(id) // watch for a failed resume
+    await this.spawn(this.get(id)!, { resume: canResume })
     this.update(id, { state: 'idle' })
   }
 
@@ -281,7 +303,10 @@ export class SessionManager extends EventEmitter {
     this.tail.delete(id)
     this.update(id, { claudeSessionId: null, transcriptPath: null })
     const session = this.get(id)
-    if (session) await this.spawn(session, { resume: false })
+    if (!session) return
+    const queued = this.sendQueue.get(id) ?? [] // a message sent to the exited card must ride into the fresh process
+    await this.spawn(session, { resume: false })
+    for (const text of queued) this.send(id, text)
   }
 
   remove(id: string): void {
@@ -411,8 +436,11 @@ export class SessionManager extends EventEmitter {
       // navigation inside the prompt doesn't, and Esc dismisses it (the
       // interrupt notice, not this, decides)
       if (s?.state === 'done') this.update(id, { state: 'idle' })
-      else if (s?.state === 'needs-attention' && (data.includes('\r') || /^[\x20-\x7e]$/.test(data))) {
-        this.update(id, { state: 'running' })
+      else if (s?.state === 'needs-attention' && data !== '\x1b') {
+        // paused by us (fallback stop / login prompt): nothing is waiting, they're
+        // composing — idle until their submit; a dialog: an answer resumes the turn
+        if (this.attentionKind.get(id) === 'paused') this.update(id, { state: 'idle' })
+        else if (data.includes('\r') || /^[\x20-\x7e]$/.test(data)) this.update(id, { state: 'running' })
       }
       // the user is typing in the terminal — abandon queued auto-submits and any
       // pending Enter retry, or a retry would fire their half-typed line (live-hit
@@ -441,6 +469,14 @@ export class SessionManager extends EventEmitter {
     } catch (e) {
       console.warn('[session] pre-submit account switch failed, sending anyway:', e) // the message must never be lost
     }
+    // an exited card takes a message too: bring the session back (resume) and
+    // let the queue deliver once its input box is up (spawn clears the queue,
+    // so enqueue only after the restart is under way)
+    if (!this.ptys.isAlive(id)) await this.restart(id)
+    // a picker/panel in the way: Esc closes it (cancels /model without picking);
+    // a dialog waiting on the user is theirs to answer — the text waits for the
+    // input box to come back
+    if (this.modal.has(id) && this.get(id)?.state !== 'needs-attention') this.ptys.write(id, '\x1b')
     this.clearFinished(id)
     this.send(id, text)
   }
@@ -464,7 +500,9 @@ export class SessionManager extends EventEmitter {
     this.trusted.delete(session.id) // …and may show a (new kind of) trust prompt afresh
     this.lastBanner.delete(session.id) // banners aren't replayed by --resume; a new process starts clean
     this.deferredStop.delete(session.id)
+    this.attentionKind.delete(session.id)
     this.clearFallbackTimer(session.id)
+    this.launchedModel.set(session.id, session.modelId) // what --model asks for (null = the CLI's default)
     this.clearSends(session.id) // queued submits from a prior incarnation must not fire into this one
     if (session.effort === 'ultracode') {
       this.pendingUltracode.add(session.id)
@@ -564,8 +602,12 @@ export class SessionManager extends EventEmitter {
         setTimeout(() => this.ptys.write(id, '\r'), 150)
       }, 400)
     }
-    // input box is up — queued submissions may now actually land
-    if (!this.tuiReady.has(id) && isTuiReady(buf)) {
+    // input box up (queued submissions may now actually land) vs a panel that
+    // took the screen — tracked per chunk: panels repaint nothing while open
+    const input = tuiInputState(data)
+    if (input === 'modal') this.modal.add(id)
+    else if (input === 'ready') {
+      this.modal.delete(id)
       this.tuiReady.add(id)
       this.drain(id)
     }
@@ -592,12 +634,20 @@ export class SessionManager extends EventEmitter {
     // "logged in" account — flag the account and hand the session to the user
     if (isLoginPrompt(data) && this.accounts.get(session.accountDir)?.loginStatus === 'logged_in') {
       this.accounts.markExpired(session.accountDir)
-      this.attention(id, 'login')
+      this.attention(id, 'login', 'paused')
     }
     const limit = detectRateLimit(buf)
-    if (limit && session.state !== 'rate-limited' && this.lastBanner.get(id) !== limit.banner) {
-      this.lastBanner.set(id, limit.banner)
-      void this.handleRateLimit(id, limit.window)
+    if (limit && session.state !== 'rate-limited') {
+      if (this.lastBanner.get(id) !== limit.banner) {
+        this.lastBanner.set(id, limit.banner)
+        void this.handleRateLimit(id, limit.window)
+      } else if (session.state === 'running' && detectRateLimit(data)) {
+        // the same notice again, freshly painted, in a new turn: a second hit of
+        // the still-parked window (the CLI refused the turn) — not a scroll
+        // repaint, which never coincides with a running turn on a live park
+        const until = this.accounts.get(session.accountDir)?.usage.limitedUntil
+        if (until != null && until > Date.now()) this.setState(id, 'rate-limited')
+      }
     }
   }
 
@@ -671,10 +721,20 @@ export class SessionManager extends EventEmitter {
         if (this.pendingUltracode.delete(sessionId)) this.send(sessionId, '/effort ultracode')
         if (this.pendingContinue.delete(sessionId)) this.send(sessionId, 'continue')
         break
-      case 'UserPromptSubmit':
+      case 'UserPromptSubmit': {
         this.deferredStop.delete(sessionId)
+        // a new request retitles an untitled card right away (claude's own
+        // summary only ever describes a conversation's FIRST prompt); wake-ups
+        // (task notifications, loops), slash commands and our own "continue" don't
+        const source = payload['source']
+        const prompt = typeof payload['prompt'] === 'string' ? payload['prompt'].trim() : ''
+        if ((source === undefined || source === 'user' || source === 'sdk') && prompt && !prompt.startsWith('/') && prompt !== 'continue') {
+          const line = prompt.split('\n')[0].replace(/\s+/g, ' ').trim()
+          this.update(sessionId, { autoTitle: line.length > 40 ? `${line.slice(0, 40)}…` : line })
+        }
         this.setState(sessionId, 'running')
         break
+      }
       case 'Stop': {
         // Stop fires at every turn boundary, including the wake-ups background
         // agents trigger when they finish. The payload lists in-flight background
@@ -718,19 +778,24 @@ export class SessionManager extends EventEmitter {
         const to = String(payload['to_model'] ?? '')
         if (!to) break
         this.clearFallbackTimer(sessionId)
+        const launched = this.launchedModel.get(sessionId) ?? session.modelId
         // automatic: a fallback — or the CLI putting the requested model back
         // (retry/revert), which is the fallback ending, not a new one
         if (payload['source'] === 'auto') {
-          if (session.modelId && sameModel(to, session.modelId)) this.update(sessionId, { fallbackModel: null })
+          if (launched && sameModel(to, launched)) this.update(sessionId, { fallbackModel: null })
           else this.onFallback(sessionId, to)
         }
         // a resume restores whatever the transcript last ran on — possibly a
         // sticky fallback; the flag we passed is still the configured model
         else if (payload['source'] === 'resume') {
+          this.launchedModel.set(sessionId, to)
           if (session.modelId && !sameModel(to, session.modelId)) this.update(sessionId, { fallbackModel: to })
         }
         // a deliberate /model (or picker): that IS the session's model now
-        else this.update(sessionId, { modelId: to, fallbackModel: null })
+        else {
+          this.launchedModel.set(sessionId, to)
+          this.update(sessionId, { modelId: to, fallbackModel: null })
+        }
         break
       }
       case 'statusline':
@@ -763,24 +828,30 @@ export class SessionManager extends EventEmitter {
       modelId !== session.modelId ||
       cliTitle !== session.cliTitle
     ) {
-      this.update(session.id, { model, effort, modelId, cliTitle })
+      // a (re)generated CLI title beats the request line; /clear (title gone) blanks it
+      this.update(session.id, { model, effort, modelId, cliTitle, ...(cliTitle !== session.cliTitle && { autoTitle: cliTitle }) })
     }
-    // live model ≠ configured model: give a user-initiated PostModelSwitch a
-    // moment to claim it, else it's the CLI falling back on its own
-    if (liveId && modelId && !sameModel(liveId, modelId)) {
+    // a "default" launch runs whatever the first statusline says it runs
+    if (liveId && !this.launchedModel.get(session.id)) this.launchedModel.set(session.id, liveId)
+    const expected = this.launchedModel.get(session.id)
+    // live model ≠ what this process was launched with: give a user-initiated
+    // PostModelSwitch a moment to claim it, else it's the CLI falling back on
+    // its own. (A modelId edited in the settings while the session runs waits
+    // for the next restart — it is not this process's model, so not a mismatch.)
+    if (liveId && expected && !sameModel(liveId, expected)) {
       if (!session.fallbackModel && !this.fallbackTimers.has(session.id)) {
         this.fallbackTimers.set(
           session.id,
           setTimeout(() => {
             this.fallbackTimers.delete(session.id)
-            const s = this.get(session.id)
-            if (s?.modelId && !sameModel(liveId, s.modelId) && this.ptys.isAlive(session.id)) this.onFallback(session.id, liveId)
+            const still = this.launchedModel.get(session.id)
+            if (still && !sameModel(liveId, still) && this.ptys.isAlive(session.id)) this.onFallback(session.id, liveId)
           }, FALLBACK_GRACE_MS)
         )
       }
     } else if (session.fallbackModel && liveId) {
       this.clearFallbackTimer(session.id)
-      this.update(session.id, { fallbackModel: null }) // back on the configured model
+      this.update(session.id, { fallbackModel: null }) // back on the launched model
     }
     // both windows are optional in the payload — patch only what's present, so
     // a five_hour-only event can't wipe the weekly numbers (or vice versa)
@@ -817,6 +888,7 @@ export class SessionManager extends EventEmitter {
 
   private drain(id: string): void {
     if (this.sending.has(id)) return
+    if (this.modal.has(id)) return // a panel is up; its closing repaint re-drains
     if (!this.tuiReady.has(id)) {
       // the footer regex is wording-sensitive — if it never matches (e.g. the
       // interrupted-resume prompt, or a future CLI change), queued text must not
@@ -854,7 +926,7 @@ export class SessionManager extends EventEmitter {
         return
       }
       retries++
-      this.ptys.write(id, '\r') // the text already sits in the input box
+      if (!this.modal.has(id)) this.ptys.write(id, '\r') // the text already sits in the input box (never into a menu)
     }, 2000)
     this.verifyTimers.set(id, timer)
   }
@@ -875,12 +947,15 @@ export class SessionManager extends EventEmitter {
     if (f) clearTimeout(f)
     this.readyFallbacks.delete(id)
     this.tuiReady.delete(id)
+    this.modal.delete(id)
   }
 
-  /** typing into a finished session brings it back to plain idle */
+  /** submitting into a finished session brings it back to plain idle — unless
+   *  a dialog is still waiting on the user (the text queues behind it) */
   private clearFinished(id: string): void {
     const s = this.get(id)
-    if (s && (s.state === 'done' || s.state === 'needs-attention')) {
+    if (!s) return
+    if (s.state === 'done' || (s.state === 'needs-attention' && this.attentionKind.get(id) !== 'dialog')) {
       this.update(id, { state: 'idle' })
     }
   }
@@ -891,7 +966,8 @@ export class SessionManager extends EventEmitter {
 
   /** The TUI is waiting on the user. One notification per wait: a PreToolUse
    *  dialog and its permission_prompt Notification would otherwise both fire. */
-  private attention(id: string, detail?: string): void {
+  private attention(id: string, detail?: string, kind: 'dialog' | 'paused' = 'dialog'): void {
+    this.attentionKind.set(id, kind) // a dialog opening on a paused session makes it a dialog wait
     if (this.get(id)?.state === 'needs-attention') return
     this.update(id, { state: 'needs-attention' })
     this.emit('notify', { id, kind: 'attention', detail })
@@ -907,6 +983,7 @@ export class SessionManager extends EventEmitter {
     if (!session.stopOnFallback) return
     this.abandonSends(id)
     if (session.state === 'running') this.ptys.write(id, '\x1b') // Esc: stop the fallback model mid-turn
+    this.attentionKind.set(id, 'paused')
     this.update(id, { state: 'needs-attention' })
     this.emit('notify', { id, kind: 'fallback', detail: `${session.modelId ?? session.model ?? '?'} → ${toModel}` })
   }

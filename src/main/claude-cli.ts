@@ -230,6 +230,11 @@ export function writeSessionSettings(
     `curl -sS -m 3 -X POST --data-binary @- http://127.0.0.1:${hookPort}/e/${sessionId}/${event}`
   const hook = (event: string) => [{ hooks: [{ type: 'command', command: post(event) }] }]
   const settings = {
+    // Remote Control auto-connects every REPL to claude.ai (2.1.258+ default):
+    // a cloud session gets registered and the transcript mirrored to Anthropic
+    // servers. Sessions this app runs stay local unless the user opts in — per
+    // session via {"remoteControlAtStartup": true} in its settings, or /rc.
+    remoteControlAtStartup: false,
     // Peer messages between our own sessions are intra-app traffic: deliver
     // them instead of holding them for approval (the CLI holds whenever the
     // two sessions' permission-mode classes differ). Before the overrides —
@@ -406,6 +411,27 @@ export function isTuiReady(text: string): boolean {
 }
 
 /**
+ * Which way the TUI's input availability last flipped in a chunk of output:
+ * 'modal' — a picker/panel/dialog took the screen (its "Esc to cancel/close"
+ * footer, or the tabbed Status·Config·Usage·Stats panel, which has no footer
+ * at all); 'ready' — the input box and its footer painted; null — neither.
+ * Verified 2.1.259: a panel repaints nothing while it sits open (no footer, no
+ * statusline), so the latest marker in the stream is the current state.
+ */
+export function tuiInputState(chunk: string): 'ready' | 'modal' | null {
+  const s = stripAnsi(chunk)
+  const last = (re: RegExp): number => {
+    let i = -1
+    for (const m of s.matchAll(re)) i = m.index
+    return i
+  }
+  const ready = last(/\?\s*for\s*shortcuts|Try\s*"|shift\+tab\s*to\s*cycle|◉\s*agents/gi)
+  const modal = last(/Esc\s*to\s*(?:cancel|close|exit|go\s*back)|Status\s*Config\s*Usage\s*Stats/gi)
+  if (modal < 0 && ready < 0) return null
+  return modal > ready ? 'modal' : 'ready'
+}
+
+/**
  * Current permission mode from TUI output, or null when the buffer carries no
  * signal. The statusline payload does NOT include it (verified 2.1.228), but
  * the input-box footer always names the active mode ("⏸ manual mode on",
@@ -570,9 +596,18 @@ function isAdvancePrompt(text: string): boolean {
   return isTrustPrompt(text) || /Choose\s*the\s*text\s*style|Press\s*Enter\s*to\s*continue/i.test(stripAnsi(text))
 }
 
+/** `--settings` for helper REPLs (the usage probe): keep them off the cloud
+ *  too — an unconfigured REPL registers a Remote Control session on startup */
+function localOnlySettings(): string {
+  const file = join(tmpdir(), 'agents-local-only-settings.json')
+  writeFileSync(file, JSON.stringify({ remoteControlAtStartup: false }))
+  return file
+}
+
 async function probeUsage(configDir: string): Promise<AccountUsage | null> {
   const [bin, env] = await Promise.all([claudePath(), envFor(configDir)])
-  const proc = pty.spawn(bin, [], { name: 'xterm-256color', cols: 120, rows: 40, cwd: scratchCwd(), env })
+  const args = ['--settings', localOnlySettings()]
+  const proc = pty.spawn(bin, args, { name: 'xterm-256color', cols: 120, rows: 40, cwd: scratchCwd(), env })
   let buf = ''
   let advances = 0
   let sent = false

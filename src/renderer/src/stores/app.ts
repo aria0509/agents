@@ -9,6 +9,9 @@ interface AppStore extends AppState {
   /** the active card (interactive terminal + chat input), or null */
   focusedId: string | null
   setFocused: (id: string | null) => void
+  /** card to flash (notification click / jump-to) — clears itself after a moment */
+  flashId: string | null
+  flash: (id: string) => void
   /** grid card size in px (width min + height), adjustable in settings */
   cardSize: number
   setCardSize: (n: number) => void
@@ -33,6 +36,11 @@ export const useApp = create<AppStore>((set) => ({
   knownModels: [],
   focusedId: null,
   setFocused: (id) => set({ focusedId: id }),
+  flashId: null,
+  flash: (id) => {
+    set({ flashId: id })
+    setTimeout(() => set((s) => (s.flashId === id ? { flashId: null } : s)), 2500)
+  },
   cardSize: clampSize(Number(localStorage.getItem(CARD_SIZE_KEY)) || 480),
   setCardSize: (n) => {
     const cardSize = clampSize(n)

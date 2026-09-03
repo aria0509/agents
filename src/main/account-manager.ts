@@ -30,7 +30,7 @@ function displayName(configDir: string): string {
 }
 
 function emptyUsage(): AccountUsage {
-  return { fiveHour: null, weekly: null, resetsAt: null, weeklyResetsAt: null, weeklyModels: [], limitedUntil: null, updatedAt: null }
+  return { fiveHour: null, weekly: null, resetsAt: null, weeklyResetsAt: null, weeklyModels: [], limitedUntil: null, limitedFamily: null, updatedAt: null }
 }
 
 /** "fable" | "opus" | "sonnet" | … from a model id or display name — the key
@@ -81,7 +81,8 @@ export class AccountManager {
       usage: {
         ...a.usage,
         weeklyModels: (a.usage?.weeklyModels ?? []).map((m) => ({ ...m, resetsAt: m.resetsAt ?? null })),
-        limitedUntil: a.usage?.limitedUntil ?? null
+        limitedUntil: a.usage?.limitedUntil ?? null,
+        limitedFamily: a.usage?.limitedFamily ?? null
       },
       usageRefreshing: this.probing.has(a.configDir),
       loginActive: this.logins.has(a.configDir),
@@ -190,7 +191,7 @@ export class AccountManager {
       // banner while the panel still reads < 100%. Clearing the park here bounced
       // the session straight back onto the limited account — an endless switch
       // loop. The park expires on its own at limitedUntil (the window reset).
-      if (usage) this.update(configDir, { usage: { ...usage, limitedUntil: this.livePark(configDir) ?? usage.limitedUntil } })
+      if (usage) this.update(configDir, { usage: { ...usage, ...this.livePark(configDir) } })
       else console.warn(`[usage] probe returned nothing for ${configDir} — keeping the previous numbers`)
     } finally {
       this.probedAt.set(configDir, Date.now()) // the attempt counts: a failing account is retried per maxAgeMs, not per turn
@@ -209,11 +210,13 @@ export class AccountManager {
     void this.refreshUsage(configDir)
   }
 
-  /** A still-future banner-set exhaustion park for this account, else null.
-   *  Usage writes carry it forward so only elapsed time clears it. */
-  private livePark(configDir: string): number | null {
-    const until = this.get(configDir)?.usage.limitedUntil
-    return until != null && until > Date.now() ? until : null
+  /** The banner-set exhaustion park for this account while it is still in the
+   *  future (else cleared). Usage writes carry it forward so only elapsed time
+   *  clears it. */
+  private livePark(configDir: string): Pick<AccountUsage, 'limitedUntil' | 'limitedFamily'> {
+    const u = this.get(configDir)?.usage
+    const live = u?.limitedUntil != null && u.limitedUntil > Date.now()
+    return { limitedUntil: live ? u!.limitedUntil : null, limitedFamily: live ? (u!.limitedFamily ?? null) : null }
   }
 
   /** Startup: auth for everyone concurrently (fast, no usage probes). */
@@ -244,9 +247,9 @@ export class AccountManager {
     // statusline events arrive on every repaint — unchanged numbers don't earn
     // a config write + broadcast (the freshness stamp still moves once a minute)
     const same =
-      (Object.keys(usage) as (keyof AccountUsage)[]).every((k) => usage[k] === u[k]) && u.limitedUntil === park
+      (Object.keys(usage) as (keyof AccountUsage)[]).every((k) => usage[k] === u[k]) && u.limitedUntil === park.limitedUntil
     if (same && Date.now() - (u.updatedAt ?? 0) < 60_000) return
-    this.update(configDir, { usage: { ...u, ...usage, limitedUntil: park, updatedAt: Date.now() } })
+    this.update(configDir, { usage: { ...u, ...usage, ...park, updatedAt: Date.now() } })
   }
 
   /** A session on this account just saw claude's "limit hit" banner for
@@ -261,15 +264,15 @@ export class AccountManager {
     const u = account.usage
     const now = Date.now()
     const future = (t: number | null | undefined): number | null => (t != null && t > now ? t : null)
-    const family = modelFamily(window)
+    // a per-model banner ("Opus limit") binds only that family — the account
+    // stays usable for the others; session/weekly/credit banners bind everything
+    const family = /^(session|week|usage|monthly)/.test(window) ? null : modelFamily(window)
     const limitedUntil =
       (/^week/.test(window) ? future(u.weeklyResetsAt) : null) ??
-      (family && !/^(session|usage|monthly)/.test(window)
-        ? future(u.weeklyModels.find((m) => modelFamily(m.name) === family)?.resetsAt ?? u.weeklyResetsAt)
-        : null) ??
+      (family ? future(u.weeklyModels.find((m) => modelFamily(m.name) === family)?.resetsAt ?? u.weeklyResetsAt) : null) ??
       (/^session/.test(window) ? future(u.resetsAt) : null) ??
       now + 30 * 60_000
-    this.update(configDir, { usage: { ...u, limitedUntil } })
+    this.update(configDir, { usage: { ...u, limitedUntil, limitedFamily: family } })
     void this.refreshUsage(configDir)
   }
 
@@ -284,20 +287,23 @@ export class AccountManager {
    * model family: the banner park, the 5-hour and weekly windows, and the
    * family's own weekly window when the panel lists one. Other families'
    * windows don't count — a spent Opus window is no reason to keep a Fable
-   * session off the account (family=null: every per-model window counts). A
-   * window whose reset time has passed reads as free again (stale data).
+   * session off the account. family=null ("Default" model, not yet reported):
+   * only the shared windows bind; the session adopts its real family from the
+   * first statusline. A window whose reset time has passed reads as free again
+   * (stale data).
    */
   usedPct(a: Account, family: string | null): number {
     const now = Date.now()
     const eff = (pct: number | null, resetsAt: number | null): number =>
       pct == null || (resetsAt != null && resetsAt <= now) ? 0 : pct
     const u = a.usage
+    const parked = u.limitedUntil != null && u.limitedUntil > now && (!u.limitedFamily || !family || u.limitedFamily === family)
     return Math.max(
-      u.limitedUntil != null && u.limitedUntil > now ? 100 : 0,
+      parked ? 100 : 0,
       eff(u.fiveHour, u.resetsAt),
       eff(u.weekly, u.weeklyResetsAt),
       ...u.weeklyModels
-        .filter((m) => !family || modelFamily(m.name) === family)
+        .filter((m) => family != null && modelFamily(m.name) === family)
         // a per-model window without its own reset time follows the weekly one
         .map((m) => eff(m.percent, m.resetsAt ?? u.weeklyResetsAt))
     )

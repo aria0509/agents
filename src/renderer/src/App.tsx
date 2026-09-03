@@ -16,17 +16,29 @@ function App() {
   const groupFilter = useApp((s) => s.groupFilter)
   const setGroupFilter = useApp((s) => s.setGroupFilter)
   const stateFilter = useApp((s) => s.stateFilter)
+  const setStateFilter = useApp((s) => s.setStateFilter)
+  const flash = useApp((s) => s.flash)
   const [newOpen, setNewOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
-    const unfocus = window.api.onFocusSession((id) => setFocused(id))
+    // a notification click (main → EVENT_FOCUS_SESSION): make the card visible
+    // whatever the filters say, activate it, scroll to it and flash it
+    const unfocus = window.api.onFocusSession((id) => {
+      const s = useApp.getState()
+      const target = s.sessions.find((x) => x.id === id)
+      if (target && s.groupFilter && s.groupFilter !== target.cwd) setGroupFilter(null)
+      if (target && s.stateFilter && s.stateFilter !== target.state) setStateFilter(null)
+      setFocused(id)
+      flash(id)
+      setTimeout(() => document.querySelector(`[data-session-id="${id}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60)
+    })
     const unsettings = window.api.onOpenSettings(() => setSettingsOpen(true)) // menu Cmd+,
     return () => {
       unfocus()
       unsettings()
     }
-  }, [setFocused])
+  }, [setFocused, setGroupFilter, setStateFilter, flash])
 
   // a filtered group whose last session was removed falls back to "all"
   useEffect(() => {

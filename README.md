@@ -15,6 +15,7 @@
 - 建立時只有工作目錄必填；帳號可留空自動選（weekly 最快重置、且此模型仍有餘量的帳號）；限額規則、啟動參數、標題皆選填（標題未填則顯示 Claude 自動摘要的標題）、事後可改。
 - 啟動參數下拉最近用過的值（去重、最多 10 條）。
 - 新目錄的信任提示（Security guide）自動確認。
+- Session 預設不接 Remote Control、不同步到雲端（注入 `remoteControlAtStartup: false`）；要讓某個 session 上雲端可在它的 settings JSON 設 `{"remoteControlAtStartup": true}` 或在 session 內打 `/rc`。
 - 主界面是可交互的終端櫥窗：點卡片啟用，啟用的卡片底部浮出 chat input（貼圖、拖檔、Shift/⌘+Enter 換行），點終端可直接鍵盤交互。可拖拽排序、獨立視窗開啟。
 
 **限額切換**（達上限時，依 session 規則）

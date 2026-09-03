@@ -149,7 +149,7 @@ function bootstrap(): void {
     if (!Notification.isSupported()) return
     const session = sessions.get(id)
     if (!session) return
-    const who = `${session.title ?? session.cliTitle ?? dirLabel(session.cwd)} · ${accounts.get(session.accountDir)?.name ?? ''}`
+    const who = `${session.title ?? session.autoTitle ?? session.cliTitle ?? dirLabel(session.cwd)} · ${accounts.get(session.accountDir)?.name ?? ''}`
     if (process.env['AGENTS_LOG_NOTIFY']) console.log(`[notify] ${kind} ${who}${detail ? ` — ${detail}` : ''}`) // e2e hook
     const n = new Notification({ title: locale(NOTIFY_TEXT)[kind], body: detail ? `${who}\n${detail}` : who })
     n.on('click', () => {

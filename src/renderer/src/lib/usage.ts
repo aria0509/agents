@@ -38,7 +38,8 @@ export function usageLines(u: AccountUsage, L: { current: string; weekly: string
   // it), and a banner park counts as full until it lapses
   const live = (v: number | null, resetsAt: number | null): number | null => (resetsAt != null && resetsAt <= now ? 0 : v)
   const withReset = (r: number | null): string => (resetIn(r) ? ` · ${L.reset} ${resetIn(r)}` : '')
-  const parked = u.limitedUntil != null && u.limitedUntil > now ? ` · ⛔ ${resetIn(u.limitedUntil)}` : ''
+  const parked =
+    u.limitedUntil != null && u.limitedUntil > now ? ` · ⛔${u.limitedFamily ? ` ${u.limitedFamily}` : ''} ${resetIn(u.limitedUntil)}` : ''
   const current = `${L.current} ${pct(live(u.fiveHour, u.resetsAt))}${withReset(u.resetsAt)}${parked}`
   // weeklyModels can be absent (statusline-sourced usage, or older persisted data)
   const models = (u.weeklyModels ?? []).map((m) => ` · ${m.name} ${pct(live(m.percent, m.resetsAt ?? u.weeklyResetsAt))}`).join('')

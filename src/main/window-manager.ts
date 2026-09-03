@@ -105,8 +105,14 @@ export class WindowManager {
     }
   }
 
+  /** Send to the main window — after it has loaded and mounted when focusMain()
+   *  just recreated it (a notification click with the window closed). */
   sendToMain(channel: string, payload: unknown): void {
-    this.main?.webContents.send(channel, payload)
+    const win = this.main
+    if (!win) return
+    if (win.webContents.isLoading()) {
+      win.webContents.once('did-finish-load', () => setTimeout(() => !win.isDestroyed() && win.webContents.send(channel, payload), 300))
+    } else win.webContents.send(channel, payload)
   }
 
   anyFocused(): boolean {

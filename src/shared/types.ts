@@ -27,6 +27,9 @@ export interface AccountUsage {
    *  usage probe or statusline must NOT lift it early, only its own expiry does,
    *  or auto-switch bounces the session back onto the still-limited account */
   limitedUntil: number | null
+  /** the model family the park binds ("fable", "opus"…) when the banner was a
+   *  per-model limit; null = the whole account (session / weekly / credits) */
+  limitedFamily?: string | null
   /** epoch ms of last successful refresh */
   updatedAt: number | null
 }
@@ -81,6 +84,11 @@ export interface Session {
   /** claude's own title, mirrored from the statusline's session_name: the
    *  /rename name, else its AI-generated summary — shown when `title` is unset */
   cliTitle: string | null
+  /** what the card shows when no title is set: the latest request's first
+   *  line, replaced by claude's own title whenever the CLI (re)generates one
+   *  (it only does so for a conversation's first prompt — later requests
+   *  would otherwise keep the stale summary); null after /clear */
+  autoTitle: string | null
   /** Claude Code's own session id (from SessionStart hook), used for --resume */
   claudeSessionId: string | null
   /** full path to the session jsonl (from SessionStart hook); moved on account switch */

@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
  */
 export function EditableTitle({ session, className }: { session: SessionView; className?: string }) {
   const [editing, setEditing] = useState(false)
-  const fallback = session.cliTitle ?? session.cwd.split('/').filter(Boolean).pop() ?? session.cwd
+  const fallback = session.autoTitle ?? session.cliTitle ?? session.cwd.split('/').filter(Boolean).pop() ?? session.cwd
 
   if (!editing)
     return (
