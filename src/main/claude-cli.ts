@@ -7,6 +7,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import {
   writeFileSync,
+  statSync,
+  readSync,
+  openSync,
+  closeSync,
+  appendFileSync,
   mkdirSync,
   copyFileSync,
   cpSync,
@@ -261,6 +266,29 @@ export function writeSessionSettings(
   const file = join(dir, `${sessionId}.json`)
   writeFileSync(file, JSON.stringify(settings))
   return file
+}
+
+/**
+ * Take a transcript off its Remote Control bridge before `--resume`. The CLI
+ * restores the last `bridge-session` record and reconnects that cloud session
+ * on resume — `remoteControlAtStartup: false` only governs fresh sessions
+ * (verified 2.1.259). `/rc` (disconnect) itself appends a record with an empty
+ * bridgeSessionId, and records are last-wins, so appending that same record
+ * is all it takes: O(1), no rewrite of a multi-MB file. No-op without a file.
+ */
+export function unbridgeTranscript(transcriptPath: string, claudeSessionId: string): void {
+  if (!existsSync(transcriptPath)) return
+  // a process killed mid-write can leave a partial last line — never glue onto it
+  const size = statSync(transcriptPath).size
+  const last = Buffer.alloc(1)
+  const fd = openSync(transcriptPath, 'r')
+  try {
+    if (size) readSync(fd, last, 0, 1, size - 1)
+  } finally {
+    closeSync(fd)
+  }
+  const record = { type: 'bridge-session', sessionId: claudeSessionId, bridgeSessionId: '', lastSequenceNum: 0 }
+  appendFileSync(transcriptPath, `${size && last[0] !== 10 ? '\n' : ''}${JSON.stringify(record)}\n`)
 }
 
 /**

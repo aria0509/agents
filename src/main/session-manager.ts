@@ -27,6 +27,7 @@ import {
   sessionArgs,
   stripAnsi,
   tuiInputState,
+  unbridgeTranscript,
   writeSessionSettings
 } from './claude-cli'
 
@@ -516,6 +517,12 @@ export class SessionManager extends EventEmitter {
       this.hooks.port,
       parseSettingsOverrides(session.settingsJson ?? '')
     )
+    // a resumed transcript remembers its cloud bridge and the CLI reconnects it
+    // regardless of remoteControlAtStartup — append the "disconnected" record
+    // /rc writes, so the session comes back local like a fresh one
+    if (opts.resume && session.claudeSessionId && session.transcriptPath) {
+      unbridgeTranscript(session.transcriptPath, session.claudeSessionId)
+    }
     const args = sessionArgs({
       settingsFile,
       launchArgs: session.launchArgs.join(' '),
