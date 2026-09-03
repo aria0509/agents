@@ -31,11 +31,25 @@ import {
   writeSessionSettings
 } from './claude-cli'
 
-/** background work claude will wake the session for once it finishes — a turn
- *  ending with any of these in flight is a pause, not "done". Shells, monitors
- *  and MCP tasks don't count (mirrors the CLI's own wait set): a dev server left
- *  running would otherwise pin the card on "running" for good. */
-const WAKING_TASK_TYPES = new Set(['local_agent', 'remote_agent', 'in_process_teammate', 'local_workflow'])
+/** background_tasks entries whose completion wakes the session (a task
+ *  notification prompt → another turn), so a Stop with one of them running is
+ *  a pause, not the end. Shell and MCP tasks don't count (mirrors the CLI's own
+ *  wait set): a dev server left running would otherwise pin the card on
+ *  "running" for good. ⚠️ `type` is the CLI's FRIENDLY label (verified 2.1.259:
+ *  local_agent → "subagent", local_workflow → "workflow", in_process_teammate →
+ *  "teammate", remote_agent → "cloud session"); the raw discriminants are kept
+ *  as fallbacks since unknown types fall through to them. Matching the raw
+ *  names alone never hit — a card went "done" while its subagent still ran. */
+const WAKING_TASK_TYPES = new Set([
+  'subagent',
+  'workflow',
+  'teammate',
+  'cloud session',
+  'local_agent',
+  'local_workflow',
+  'in_process_teammate',
+  'remote_agent'
+])
 /** Notification hook types that mean the TUI is waiting on the user. Others:
  *  idle_prompt (claude has been sitting at the prompt), auth_success,
  *  agent_completed (Stop covers it), push_notification (relayed as-is). */
