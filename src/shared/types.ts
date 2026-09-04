@@ -123,6 +123,9 @@ export interface Session {
   stopOnFallback: boolean
   /** the model id the CLI fell back to, while it differs from modelId */
   fallbackModel: string | null
+  /** the limit banner last seen — the CLI records it in the transcript, so a
+   *  --resume replays it verbatim; only a different banner is a new limit hit */
+  lastLimitBanner: string | null
 }
 
 /** a `--model` choice: id exactly as the CLI reports it (may carry a `[1m]`

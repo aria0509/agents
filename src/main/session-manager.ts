@@ -145,9 +145,6 @@ export class SessionManager extends EventEmitter {
   private escAt = new Map<string, number>()
   /** statusline-vs-configured model mismatches waiting out FALLBACK_GRACE_MS */
   private fallbackTimers = new Map<string, NodeJS.Timeout>()
-  /** the limit banner last acted on per session — the notice stays in the
-   *  conversation and repaints on scroll, which must not park the account again */
-  private lastBanner = new Map<string, string>()
   /** the model each live process is known to run: what it was launched with,
    *  the first statusline of a "default" launch, or a user /model — the
    *  yardstick for fallback detection (NOT the persisted modelId, which the
@@ -215,6 +212,7 @@ export class SessionManager extends EventEmitter {
         cliTitle: s.cliTitle ?? null,
         stopOnFallback: s.stopOnFallback ?? false,
         fallbackModel: null,
+        lastLimitBanner: s.lastLimitBanner ?? null,
         poppedOut: false,
         state: 'exited' as const,
         ...(s.transcriptPath && !existsSync(s.transcriptPath) ? { claudeSessionId: null, transcriptPath: null } : {})
@@ -263,7 +261,8 @@ export class SessionManager extends EventEmitter {
       settingsJson: input.settingsJson,
       draft: null,
       stopOnFallback: input.stopOnFallback,
-      fallbackModel: null
+      fallbackModel: null,
+      lastLimitBanner: null
     }
     this.store.set('sessions', [...this.list(), session])
     await this.spawn(session, { resume: false })
@@ -326,7 +325,6 @@ export class SessionManager extends EventEmitter {
     this.clearResetTimer(id)
     this.clearFallbackTimer(id)
     this.escAt.delete(id)
-    this.lastBanner.delete(id)
     this.deferredStop.delete(id)
     this.tail.delete(id)
     this.trusted.delete(id)
@@ -511,7 +509,6 @@ export class SessionManager extends EventEmitter {
     this.tail.delete(session.id)
     this.bypassAccepted.delete(session.id) // the new process shows the disclaimer afresh
     this.trusted.delete(session.id) // …and may show a (new kind of) trust prompt afresh
-    this.lastBanner.delete(session.id) // banners aren't replayed by --resume; a new process starts clean
     this.deferredStop.delete(session.id)
     this.attentionKind.delete(session.id)
     this.clearFallbackTimer(session.id)
@@ -657,15 +654,23 @@ export class SessionManager extends EventEmitter {
     }
     const limit = detectRateLimit(buf)
     if (limit && session.state !== 'rate-limited') {
-      if (this.lastBanner.get(id) !== limit.banner) {
-        this.lastBanner.set(id, limit.banner)
-        void this.handleRateLimit(id, limit.window)
-      } else if (session.state === 'running' && detectRateLimit(data)) {
-        // the same notice again, freshly painted, in a new turn: a second hit of
-        // the still-parked window (the CLI refused the turn) — not a scroll
-        // repaint, which never coincides with a running turn on a live park
-        const until = this.accounts.get(session.accountDir)?.usage.limitedUntil
-        if (until != null && until > Date.now()) this.setState(id, 'rate-limited')
+      // The CLI records the banner in the transcript, so every --resume (account
+      // switch, app restart) REPLAYS the last one verbatim — acting on a replay
+      // parked each healthy account in turn until none was left (live-hit).
+      // Remember the text (persisted: the replay outlives process and app run)
+      // so repaints stay inert; only a DIFFERENT banner painted mid-turn in
+      // fresh output is a new live hit — replays arrive outside a running turn.
+      const isNew = session.lastLimitBanner !== limit.banner
+      if (isNew) this.update(id, { lastLimitBanner: limit.banner })
+      if (session.state === 'running' && detectRateLimit(data)) {
+        if (isNew) void this.handleRateLimit(id, limit.window)
+        else {
+          // the same notice again, freshly painted, in a new turn: a second hit
+          // of the still-parked window (the CLI refused the turn) — not a scroll
+          // repaint, which never coincides with a running turn on a live park
+          const until = this.accounts.get(session.accountDir)?.usage.limitedUntil
+          if (until != null && until > Date.now()) this.setState(id, 'rate-limited')
+        }
       }
     }
   }
